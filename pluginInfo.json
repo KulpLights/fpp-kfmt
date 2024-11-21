@@ -1,0 +1,19 @@
+{
+	"repoName": "fpp-kfmt",
+	"name": "KulpLights K-FMT",
+	"author": "Daniel Kulp",
+	"description": "RDS/Audio support for the KulpLights K-FMT FM Transmitter",
+	"homeURL": "https://github.com/KulpLights/fpp-kfmt",
+	"srcURL": "https://github.com/KulpLights/fpp-kfmt.git",
+	"bugURL": "https://github.com/KulpLights/fpp-kfmt/issues",
+	"versions": [
+        {
+            "minFPPVersion": "8.0",
+            "maxFPPVersion": "0",
+            "branch": "main",
+            "sha": "",
+            "allowUpdates": 1
+        }
+	]
+}
+

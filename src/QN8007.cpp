@@ -56,6 +56,13 @@ QN8007::~QN8007() {
 
 }
 
+void QN8007::reset() {
+    write1Byte(REG_SYSTEM2,0x80);
+    std::this_thread::sleep_for(std::chrono::microseconds(100));
+	write1Byte(REG_SYSTEM2,0x00); 
+}
+
+
 inline const char *mapCurrent(int i) {
     switch(i) {
         case 1: return "2mA";
@@ -146,8 +153,10 @@ void QN8007::sendRadioText(const std::string &rt) {
 }
 
 void QN8007::mute() {
-    
+    i2c.writeByteData(REG_ANACTL1, 0xAB);    
 }
 void QN8007::unmute() {
-
+    i2c.writeByteData(REG_ANACTL1, 0x2B);
 }
+ 
+

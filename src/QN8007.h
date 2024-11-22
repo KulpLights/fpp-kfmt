@@ -7,6 +7,8 @@ public:
     QN8007();
     ~QN8007();
 
+    void reset();
+
     void printInfo();
 
 

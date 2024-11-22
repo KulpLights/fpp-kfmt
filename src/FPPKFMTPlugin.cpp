@@ -117,6 +117,54 @@ public:
         }
         delete sendThread;
     }
+
+    void initialize() {
+        qn8007.reset();
+        std::this_thread::sleep_for(std::chrono::microseconds(30));
+
+/*
+        qn8007.setClockSource(0x00); // XTAL on pins 1 & 2.
+        qn8007.setCrystalFreq(12);
+        qn8007.setCrystalCurrent(30); // 30% of 400uA Max = 120uA.
+        qn8007.setTxFreqDeviation(0x81); // 75Khz, Total Broadcast channel Bandwidth
+        qn8007.setTxPilotFreqDeviation(9); // Use default 9% (6.75KHz) Pilot Tone Deviation.
+        qn8007.setRfPower();
+        for (uint8_t i = 0; i < RADIO_CAL_RETRY; i++) { // Allow several attempts to get good port matching results.
+            if (calibrateAntenna()) {                   // QN8027 RF Port Matching OK, exit.
+                testCode = FM_TEST_OK;
+                break;
+            } else {
+                testCode = FM_TEST_VSWR; // Report High VSWR.
+                if (i < RADIO_CAL_RETRY - 1) {
+                    sprintf(logBuff, "-> Retesting QN8027 RF Port Matching, Retry #%d", i + 1);
+                    Log.warningln(logBuff);
+                }
+            }
+        }
+         setPreEmphasis();
+        setVgaGain(); // Tx Input Buffer Gain.
+        setDigitalGain();
+        setAudioImpedance();
+        radio.MonoAudio(!stereoEnbFlg);
+        delay(5);
+        radio.scrambleAudio(OFF);
+        radio.clearAudioPeak();
+        radio.mute(muteFlg);
+        setRfAutoOff();
+        radio.Switch(uint8_t(rfCarrierFlg));
+
+
+        radio.setFrequency((float(fmFreqX10)) / 10.0f);
+        radio.setRDSFreqDeviation(10); // RDS Freq Deviation = 0.35KHz * Value.
+        radio.RDS(ON);
+
+        radio.updateSYSTEM_REG(); // This is needed to Start FM Broadcast.
+        radio.clearAudioPeak();
+        radio.setPiCode(rdsLocalPiCode);
+        radio.setPtyCode(rdsLocalPtyCode);
+    */
+    }
+
     void run() {
         std::unique_lock<std::mutex> lk(lock);
         while (running) {

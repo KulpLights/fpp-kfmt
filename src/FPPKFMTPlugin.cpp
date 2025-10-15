@@ -13,13 +13,13 @@
 #include "Plugin.h"
 #include "log.h"
 #include "commands/Commands.h"
-#include "QN8007.h"
+#include "QN8027.h"
 
 
 
 class FPPKFMTPlugin : public FPPPlugin {
 public:
-    QN8007 qn8007;
+    QN8027 qn8027;
     
     std::string stationName = "";
     std::string rdsText = "";
@@ -60,31 +60,13 @@ public:
         uint8_t pe = std::stoi(settings["Preemphasis"]);
         std::unique_lock<std::mutex> lk(lock);
         functions.emplace([this, ffreq, sc, pt, pe]() {
-            qn8007.setChannel(ffreq);
-            qn8007.setPreemphasis(pe);
-            qn8007.setStationCode(sc);
-            qn8007.setProgramType(pt);
-            qn8007.startTransmit();            
-            qn8007.printInfo();
+            qn8027.setChannel(ffreq);
+            qn8027.setPreemphasis(pe);
+            qn8027.setStationCode(sc);
+            qn8027.setProgramType(pt);
+            qn8027.startTransmit();            
+            qn8027.printInfo();
         });
-
-        /*
-        int v2 = sc[1] - 65;
-        int v3 = sc[2] - 65;
-        int v4 = sc[3] - 65;
-        if (v2 < 0 || v2 > 26) v2 = 0;
-        if (v3 < 0 || v3 > 26) v3 = 0;
-        if (v4 < 0 || v4 > 26) v4 = 0;
-        int v1 = (sc[0] == 'W') ? 21672 : 4096;
-        v1 += v4;
-        v1 += v3 * 26;
-        v1 += v2 * 26 * 26;
-        char buf[32];
-        sprintf(buf, "pic=0x%X", v1);
-        urls.emplace(buf);
-        urls.emplace("start=rds");
-        urls.emplace("pty=" + settings["ProgramType"]);
-        */
 
         lk.unlock();
         stopAction();
@@ -99,7 +81,7 @@ public:
 
     virtual ~FPPKFMTPlugin() {
         functions.emplace([this]() {
-            qn8007.stopTransmit();
+            qn8027.stopTransmit();
         });
         condition.notify_all();
         std::unique_lock<std::mutex> lk(lock);
@@ -119,16 +101,17 @@ public:
     }
 
     void initialize() {
-        qn8007.reset();
+        printf("Initializing QN8027\n");
+        qn8027.reset();
         std::this_thread::sleep_for(std::chrono::microseconds(30));
 
 /*
-        qn8007.setClockSource(0x00); // XTAL on pins 1 & 2.
-        qn8007.setCrystalFreq(12);
-        qn8007.setCrystalCurrent(30); // 30% of 400uA Max = 120uA.
-        qn8007.setTxFreqDeviation(0x81); // 75Khz, Total Broadcast channel Bandwidth
-        qn8007.setTxPilotFreqDeviation(9); // Use default 9% (6.75KHz) Pilot Tone Deviation.
-        qn8007.setRfPower();
+        qn8027.setClockSource(0x00); // XTAL on pins 1 & 2.
+        qn8027.setCrystalFreq(12);
+        qn8027.setCrystalCurrent(30); // 30% of 400uA Max = 120uA.
+        qn8027.setTxFreqDeviation(0x81); // 75Khz, Total Broadcast channel Bandwidth
+        qn8027.setTxPilotFreqDeviation(9); // Use default 9% (6.75KHz) Pilot Tone Deviation.
+        qn8027.setRfPower();
         for (uint8_t i = 0; i < RADIO_CAL_RETRY; i++) { // Allow several attempts to get good port matching results.
             if (calibrateAntenna()) {                   // QN8027 RF Port Matching OK, exit.
                 testCode = FM_TEST_OK;
@@ -172,7 +155,7 @@ public:
             if (ct > nextStationTime && curStationIdString < stationIdStrings.size()) {
                 std::string s = stationIdStrings[curStationIdString];
                 functions.emplace([this, s]() {
-                    qn8007.sendStationName(s);
+                    qn8027.sendStationName(s);
                 });
 
                 curStationIdString++;
@@ -187,7 +170,7 @@ public:
                     s = std::string(" ");
                 }
                 functions.emplace([this, s]() {
-                    qn8007.sendRadioText(s);
+                    qn8027.sendRadioText(s);
                 });
                 curRDSString++;
                 if (curRDSString == 3 || rdsStrings[curRDSString] == "") {
@@ -213,12 +196,12 @@ public:
         if (settings["IdleAction"] == "1") {
             std::unique_lock<std::mutex> lk(lock);
             functions.emplace([this]() {
-                qn8007.unmute();
+                qn8027.unmute();
             });
         } else if (settings["IdleAction"] == "2") {
             std::unique_lock<std::mutex> lk(lock);
             functions.emplace([this]() {
-                qn8007.startTransmit();
+                qn8027.startTransmit();
             });
         }
         condition.notify_all();
@@ -228,12 +211,12 @@ public:
         if (settings["IdleAction"] == "1") {
             std::unique_lock<std::mutex> lk(lock);
             functions.emplace([this]() {
-                qn8007.mute();
+                qn8027.mute();
             });
         } else if (settings["IdleAction"] == "2") {
             std::unique_lock<std::mutex> lk(lock);
             functions.emplace([this]() {
-                qn8007.stopTransmit();
+                qn8027.stopTransmit();
             });
         }
         condition.notify_all();
@@ -362,7 +345,6 @@ public:
     void setDefaultSettings() {
         setIfNotFound("Frequency", "87.9");
         setIfNotFound("IdleAction", "0");
-        setIfNotFound("EnablePin", "");
         setIfNotFound("Preemphasis", "1");
 
         setIfNotFound("StationID", "Merry   Christ- mas", true);        

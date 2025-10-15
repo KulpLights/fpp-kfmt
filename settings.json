@@ -1,17 +1,15 @@
 {
     "settingGroups": {
-        "KFMTDevice": {
-            "description": "Device Settings",
-            "settings": [
-                "EnablePin"
-            ]   
-        },
         "KFMTRadio": {
             "description": "Radio Settings",
             "settings": [
                 "Frequency",
                 "Preemphasis",
-                "IdleAction"
+                "IdleAction",
+                "TransmitPower",
+                "InputImpedance",
+                "TXDigitalGain",
+                "TXInputBufferGain"
             ]   
         },
         "KFMTRDSSettings": {
@@ -29,15 +27,6 @@
         }
     },
     "settings": {
-        "EnablePin": {
-            "name": "EnablePin",
-            "description": "GPIO Enable/Reset Pin",
-            "tip": "Which GPIO pin is connected to the Enable/Reset.",
-            "restart": 1,
-            "reboot": 0,
-            "type": "select",
-            "optionsURL": "api/gpio?list=true"
-        },
         "IdleAction": {
             "name": "IdleAction",
             "description": "Playlist Idle Behavior",
@@ -152,6 +141,57 @@
             "default": "WFPP",
             "size": 6,
             "maxlength": 4
+        },
+        "TransmitPower": {
+            "name": "TransmitPower",
+            "description": "Transmit Power",
+            "tip": "Transmit Power Level. Higher values increase range but also increase distortion.",
+            "restart": 1,
+            "reboot": 0,
+            "type": "number",
+            "default": 100,
+            "min": 1,
+            "max": 100
+        },
+        "InputImpedance": {
+            "name": "InputImpedance",
+            "description": "Audio Input Impedance",
+            "tip": "Audio Input Impedance (k ohms).",
+            "restart": 1,
+            "reboot": 0,
+            "level": 1,
+            "type": "select",
+            "default": 20,
+            "options": {
+                "5 k ohms": 5,
+                "10 k ohms": 10,
+                "20 k ohms": 20,
+                "40 k ohms": 40
+            }
+        },
+        "TXDigitalGain": {
+            "name": "TXDigitalGain",
+            "description": "TX Digital Gain",
+            "tip": "Transmit Digital Gain (0dB - 2dB). Higher values increase range but also increase distortion.",
+            "restart": 1,
+            "reboot": 0,
+            "type": "number",
+            "default": 0,
+            "min": 0,
+            "max": 2,
+            "level": 1
+        },
+        "TXInputBufferGain": {
+            "name": "TXInputBufferGain",
+            "description": "TX Input Buffer Gain",
+            "tip": "Transmit Input Buffer Gain (0-5). Higher values increase range but also increase distortion.",
+            "restart": 1,
+            "reboot": 0,
+            "type": "number",
+            "default": 3,
+            "min": 0,
+            "max": 5,
+            "level": 1
         },
         "ProgramType": {
             "name": "ProgramType",

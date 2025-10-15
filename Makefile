@@ -5,7 +5,7 @@ include $(SRCDIR)/makefiles/platform/*.mk
 all: libfpp-kfmt.$(SHLIB_EXT)
 debug: all
 
-OBJECTS_fpp_kfmt_so += src/FPPKFMTPlugin.o  src/QN8007.o
+OBJECTS_fpp_kfmt_so += src/FPPKFMTPlugin.o  src/QN8027.o
 LIBS_fpp_kfmt_so += -L$(SRCDIR) -lfpp -ljsoncpp
 CFLAGS += -I$(SRCDIR)
 

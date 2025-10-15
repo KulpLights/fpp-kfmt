@@ -5,6 +5,8 @@
 #include <thread>
 #include <cstring>
 
+#include "log.h"
+
 #ifdef PLATFORM_PI
 constexpr int I2CBus = 1;
 #else
@@ -32,22 +34,38 @@ constexpr uint8_t REG_FDEV = 0x11; // TX frequency deviation control
 constexpr uint8_t REG_RDS = 0x12; // Specify RDS frequency deviation, RDS mode selection
 constexpr uint8_t REG_ANT = 0x1E; // Antenna tuning control
 
+const char * mapFSM(uint8_t fsm) {
+    switch (fsm) {
+        case 0: return "RESET";
+        case 1: return "Calibrating";
+        case 2: return "Idle";
+        case 3: return "TX-RSTB";
+        case 4: return "PA Calibration";
+        case 5: return "Transmitting";
+        case 6: return "PA Off";
+        default: return "Unknown";
+    }
+}
+
+
 
 QN8027::QN8027() :  i2c(I2CBus, 0x2c) {
     channel = 87.9f;
     piCode = 0;
     ptyCode = 0;
-    uint8_t cid1 = i2c.readByteData(REG_CID1);
-    uint8_t cid2 = i2c.readByteData(REG_CID2);
-
-    printf("CID1: %02X   CID2: %02X\n", cid1, cid2);
-
-    reset();
 }
 
 QN8027::~QN8027() {
 
 }
+
+bool QN8027::detect() {
+    uint8_t cid1 = i2c.readByteData(REG_CID1);
+    uint8_t cid2 = i2c.readByteData(REG_CID2);
+    LogDebug(VB_PLUGIN, "CID1: %02X   CID2: %02X\n", cid1, cid2);
+    return cid1 != 0 && cid1 != 0xFF && cid2 != 0 && cid2 != 0xFF;
+}
+
 void QN8027::write1Byte(uint8_t regAddr, uint8_t data) {
     i2c.writeByteData(regAddr, data);
 }
@@ -74,7 +92,6 @@ void QN8027::updateSYSTEM_REG(){
 }
 
 void QN8027::reset() {
-    printf("Reset\n");
     systemReg.byte = 0x00;
     chReg = 0;
     gpltReg.byte = 0xA5;
@@ -84,8 +101,9 @@ void QN8027::reset() {
     pacReg.byte = 0x7F;
 
     write1Byte(REG_SYSTEM,0x80);
-    std::this_thread::sleep_for(std::chrono::microseconds(100));
+    waitForIdle(5);
 	write1Byte(REG_SYSTEM,0x00); 
+    waitForIdle(5);
 
     setClockSource(0x00); // XTAL on pins 1 & 2.
     setCrystalFreq(12);
@@ -100,8 +118,6 @@ void QN8027::reset() {
     RDS(1); // Enable RDS
     setRDSFreqDeviation(10);
     setChannel(channel);
-
-    
 }
 
 void QN8027::waitForIdle(int maxms) {
@@ -120,53 +136,68 @@ void QN8027::waitForIdle(int maxms) {
 
 
 void QN8027::calibrate() {
-    printf("Calibrate\n");
-    write1Byte(REG_SYSTEM,0x40);
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
-	write1Byte(REG_SYSTEM, systemReg.byte);
+    StatusReg sr1;
+    sr1.byte = i2c.readByteData(REG_STATUS);
+
+    systemReg.fields.recalibrate = 1;
+    systemReg.fields.radioStatus = 1;
+    updateSYSTEM_REG();
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+
+    int waited = 0;
+    do {
+        sr1.byte = i2c.readByteData(REG_STATUS);
+        if (sr1.fields.fsm == 2 || sr1.fields.fsm == 5 || sr1.fields.fsm == 0) {
+            // 2 is idle, 5 is transmitting, 0 is reset
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        waited += 1;
+    } while (waited < 50);
+
+    systemReg.fields.recalibrate = 0;
+    updateSYSTEM_REG();
+    waitForIdle(50);
 }
 
 void QN8027::mute() {
-    printf("Mute\n");
     systemReg.fields.muteAudio = 1;
     updateSYSTEM_REG();
+    waitForIdle(50);
 }
 void QN8027::unmute() {
-    printf("Unmute\n");
     systemReg.fields.muteAudio = 0;
     updateSYSTEM_REG();
+    waitForIdle(50);
 }
 void QN8027::setMonoAudio(bool mono) {
-    printf("Set Mono Audio: %d\n", mono);
     systemReg.fields.monoAudio = mono ? 1 : 0;
     updateSYSTEM_REG();
+    waitForIdle(50);
 }
 
 void QN8027::startTransmit() {
-    printf("Start Transmit\n");
+    calibrate();
     systemReg.fields.radioStatus = 1;
     updateSYSTEM_REG();
     waitForIdle(50);
-    calibrate();
-    waitForIdle(50);
 }
 void QN8027::stopTransmit() {
-    printInfo();
-    printf("Stop Transmit\n");
     systemReg.fields.radioStatus = 0;
     updateSYSTEM_REG();
+    waitForIdle(50);
 }
 
 void QN8027::setChannel(float frequency) {
-    printf("Set Channel: %0.2f\n", frequency);
     channel = frequency;
 
     uint16_t frequencyB = ((frequency + 0.001f) * 100.0f - 7600.0f) / 5.0f;
 	uint8_t frequencyH = frequencyB >> 8;
 	systemReg.fields.channelHigh = frequencyH & 0x03;
 	chReg = frequencyB & 0XFF;
-	write1Byte(REG_SYSTEM, frequencyH);
+    updateSYSTEM_REG();
 	write1Byte(REG_CH1, chReg);
+    waitForIdle(50);
 }
 float QN8027::getChannel() {
     uint8_t frequencyH = i2c.readByteData(REG_SYSTEM) & 0x03;
@@ -176,33 +207,18 @@ float QN8027::getChannel() {
 }
 
 void QN8027::scrambleAudio(bool scramble) {
-    printf("Set Scramble Audio: %d\n", scramble);
     gpltReg.fields.privateMode = scramble ? 1 : 0;
     write1Byte(REG_GPLT, gpltReg.byte);
 }
 void QN8027::setPreemphasis(bool us) {
-    printf("Set Preemphasis: %d\n", us);
     gpltReg.fields.preEmphTime = us ? 1 : 0;
     write1Byte(REG_GPLT, gpltReg.byte);
 }
 
-/*
-Type::meaning
-0   :: Using XTAL 				between pin1 and pin2
-1	:: Inject digital clock 	between pin1 and ground.
-2	:: single end sin wave 		between pin1 and ground.
-3	:: differential sin wave 	between pin1 and pin2
-*/
 void QN8027::setClockSource(uint8_t Type){
 	xtlReg.fields.clockSource = Type;
     write1Byte(REG_XTL, xtlReg.byte);
 }
-/*
-maximum current can be 400 uA
-you can input percentage of 400 in parameter
-for example setCrystalCurrent(50) means 50% of 400 = 200uA
-default is 100 micro ampere.
-*/
 void QN8027::setCrystalCurrent(float percentOfMax) {  //current between 0 to 400 uA
 	uint8_t CrystalCurrentuA = (uint8_t)((percentOfMax*64)/100);
     xtlReg.fields.currentControl = CrystalCurrentuA;
@@ -215,13 +231,6 @@ void QN8027::setTxPilotFreqDeviation(uint8_t PGain) {
     write1Byte(REG_GPLT, gpltReg.byte);
 }
 
-
-/*
-if clock input source is XTAL then you can set which XTAL was used.
-Freq::Meaning
-12  :: 12 MHz
-24  :: 24 MHz (default)
-*/
 void QN8027::setCrystalFreq(uint8_t Freq){
 	if (Freq == 24) {
         vgaReg.fields.crystalFreqMHz = 1;
@@ -231,12 +240,6 @@ void QN8027::setCrystalFreq(uint8_t Freq){
     write1Byte(REG_VGA, vgaReg.byte);
 }
 
-/*
-set audio amplification in input buffer. actual gain is also depends on inputImpedence() functions parameter.
-actual gain in dB = Gain = [(IBGain+1)*3] - [LRInputImpdKOhm*6]
-you can set IBGain value from 0 to 5
-default is 3
-*/
 void QN8027::setTxInputBufferGain(uint8_t IBGain) {
     if (IBGain > 5) {
         IBGain = 5;
@@ -245,12 +248,6 @@ void QN8027::setTxInputBufferGain(uint8_t IBGain) {
     write1Byte(REG_VGA, vgaReg.byte);
 }
 
-/* Digital Audio Amplification in decible.
-DGain::Meaning
-0    :: 0 dB (default)
-1	 :: 1 dB
-2	 :: 2 dB
-*/
 void QN8027::setTxDigitalGain(uint8_t DGain) {
     if (DGain > 2) {
         DGain = 2;
@@ -284,78 +281,59 @@ void QN8027::setTxFreqDeviation(uint8_t Fdev){
 	write1Byte(REG_FDEV, Fdev);
 }
 
-//---------------------------RDS_REG-------------------------------------------------------
-/* set RDS channel ON or OFF */
 void QN8027::RDS(uint8_t onOffCtrl) {
     rdsReg.fields.rdsEnable = (onOffCtrl) ? 1 : 0;
     write1Byte(REG_RDS, rdsReg.byte);
 }
 
-/* set bandwidth of RDS channel.
-actual bandwidth in KHz = RDSFreqDev * 0.35
-RDSFreqDev value can be set from 0 to 127
-default is 6 which means 2.1 KHz
-maximum bandwidth can be 44.45 KHz by setting RDSFreqDev value to 127
-*/
 void QN8027::setRDSFreqDeviation(uint8_t RDSFreqDev) {
     rdsReg.fields.rdsFdev = RDSFreqDev;
     write1Byte(REG_RDS, rdsReg.byte);
 }
 
-
-
-
 void QN8027::clearAudioPeak() {
     pacReg.fields.AudioPeakClear = !pacReg.fields.AudioPeakClear;
     write1Byte(REG_PAC, pacReg.byte);
 }
-/*
-sets power of internal RF Power Amplifier.
-you can set value from 20 to 75 (decimal).
-actual power = 0.62 * setX + 71 dBu
-maximum power can be 117.5 dBu
-minimum power can be 83.4  dBu
-default value of setX is 127 which makes no sense(not between 20 and 75). but we assumes that default is max.
-although setX is 7 bit long, which means you can set values from 0 to 127. but they said not to be valid.
-NOTE: Power will not be updated until RF carrier state is toggled Off-On (radioStatus bit).
-*/
 
 void QN8027::setTxPower(uint8_t setX) {
     pacReg.fields.paTarget = setX & 0x7F;
     write1Byte(REG_PAC, pacReg.byte);
 }
 
+
 void QN8027::printInfo() {
     statusReg.byte = i2c.readByteData(REG_STATUS);
-    printf("Status: %02X   \n", statusReg.byte);
-    printf("  Channel: %0.2f MHz\n", getChannel());
 
+    LogInfo(VB_PLUGIN, "Status: %02X   \n", statusReg.byte);
+    LogInfo(VB_PLUGIN, "  Channel: %0.2f MHz\n", getChannel());
+    LogInfo(VB_PLUGIN, "  Audio Peak: %d\n", statusReg.fields.audioPeak);
+    LogInfo(VB_PLUGIN, "  FSM: %1X  %s\n", statusReg.fields.fsm, mapFSM(statusReg.fields.fsm));
+    LogInfo(VB_PLUGIN, "  RDS Sent Status: %d\n", statusReg.fields.rdsSentStatus);
     uint8_t ant = i2c.readByteData(REG_ANT);
-    printf("  Antenna Tuning: %02X\n", ant);
-    printf("  Audio Peak: %d\n", statusReg.fields.audioPeak);
+    LogInfo(VB_PLUGIN, "  Antenna Tuning: %02X\n", ant);
 }
-
 
 void QN8027::setStationCode(const std::string &sc) {
     if (sc.length() < 4) {
-        printf("Station Code too short, must be 4 characters\n");
+        LogInfo(VB_PLUGIN, "Station Code too short, must be 4 characters\n");
         return;
     }
     if (sc[0] != 'K' && sc[0] != 'W') {
-        printf("Station Code must start with K or W\n");
-        return;
+        piCode = std::strtol(sc.c_str(), nullptr, 16) & 0xFFFF;
+    } else {
+        uint16_t v2 = sc[1] - 65;
+        uint16_t v3 = sc[2] - 65;
+        uint16_t v4 = sc[3] - 65;
+        if (v2 < 0 || v2 > 26) v2 = 0;
+        if (v3 < 0 || v3 > 26) v3 = 0;
+        if (v4 < 0 || v4 > 26) v4 = 0;
+        uint16_t v1 = (sc[0] == 'W') ? 21672 : 4096;
+        v1 += v4;
+        v1 += v3 * 26;
+        v1 += v2 * 26 * 26;
+        piCode = v1 & 0xFFFF;
     }
-    uint16_t v2 = sc[1] - 65;
-    uint16_t v3 = sc[2] - 65;
-    uint16_t v4 = sc[3] - 65;
-    if (v2 < 0 || v2 > 26) v2 = 0;
-    if (v3 < 0 || v3 > 26) v3 = 0;
-    if (v4 < 0 || v4 > 26) v4 = 0;
-    uint16_t v1 = (sc[0] == 'W') ? 21672 : 4096;
-    v1 += v4;
-    v1 += v3 * 26;
-    v1 += v2 * 26 * 26;
-    piCode = v1 & 0xFFFF;
 }
 void QN8027::setProgramType(uint8_t pty) {
     ptyCode = pty & 0x1F;
@@ -377,8 +355,6 @@ void QN8027::waitForRDSSend(){
 }
 
 void QN8027::sendStationName(const std::string &sn) {
-    //printf("Send Station Name: %s\n", sn.c_str());
-
     char char_array[9] = {0}; // PS Name is max 8 characters + null terminator.
     strncpy(char_array, sn.c_str(), sizeof(char_array));
     int str_len = strlen(char_array);
@@ -387,14 +363,14 @@ void QN8027::sendStationName(const std::string &sn) {
 	for(int i = 0; i < rds_len; i += 2) {
         uint8_t ptyHi = (ptyCode & 0x18) >> 3; //top 2 bits of PTY are in bottom 2 bits of byte 3
         uint8_t ptyLo = (ptyCode << 5) & 0xE0; //bottom 3 bits of PTY are in top 3 bits of byte 4
-		sendRDS((piCode >> 8) * 0xFF, piCode & 0xFF, ptyHi, ptyLo | (0x08+(i/2)), 0xE0, 0xCD, char_array[i], char_array[i + 1]);
+		sendRDS((piCode >> 8) * 0xFF, piCode & 0xFF, 
+                 ptyHi, ptyLo | (0x08+(i/2)), 
+                 0xE0, 0xCD, char_array[i], char_array[i + 1]);
 		waitForRDSSend();
 	}
 
 }
 void QN8027::sendRadioText(const std::string &rt) {
-    //printf("Send Radio Text: %s\n", rt.c_str());
-
     char char_array[65];
     strncpy(char_array, rt.c_str(), sizeof(char_array));
     int str_len = strlen(char_array);
@@ -403,7 +379,8 @@ void QN8027::sendRadioText(const std::string &rt) {
 	for (int i = 0; i < rds_len; i += 4) {
         uint8_t ptyHi = (ptyCode & 0x18) >> 3; //top 2 bits of PTY are in bottom 2 bits of byte 3
         uint8_t ptyLo = (ptyCode << 5) & 0xE0; //bottom 3 bits of PTY are in top 3 bits of byte 4
-		sendRDS((piCode >> 8) * 0xFF, piCode & 0xFF, 0x20 | ptyHi, ptyLo | (i/4),
+		sendRDS((piCode >> 8) * 0xFF, piCode & 0xFF, 
+                0x20 | ptyHi, ptyLo | (i/4),
                 char_array[i], char_array[i+1], char_array[i+2], char_array[i+3]);
 		waitForRDSSend();
 	}

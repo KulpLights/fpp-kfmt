@@ -7,6 +7,7 @@ public:
     QN8027();
     ~QN8027();
 
+    bool detect();
     void reset();
 
     void printInfo();

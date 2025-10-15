@@ -14,17 +14,15 @@
 #include "log.h"
 #include "commands/Commands.h"
 #include "QN8027.h"
+#include "Warnings.h"
 
 
 
-class FPPKFMTPlugin : public FPPPlugin {
+class FPPKFMTPlugin : public FPPPlugins::Plugin, public FPPPlugins::PlaylistEventPlugin {
 public:
     QN8027 qn8027;
+    bool detected = false;
     
-    std::string stationName = "";
-    std::string rdsText = "";
-    std::string rdsText2 = "";
-    std::string rdsText3 = "";
 
     volatile bool running = true;
     std::mutex lock;
@@ -43,46 +41,39 @@ public:
     int curRDSString = 0;
     uint64_t nextRDSTime = 0;
 
-    FPPKFMTPlugin() : FPPPlugin("fpp-kfmt") {
+    FPPKFMTPlugin() : FPPPlugins::Plugin("fpp-kfmt", true), FPPPlugins::PlaylistEventPlugin() {
         setDefaultSettings();
 
         stationIdCycleTime = std::stoi(settings["StationIDTime"]);
         rdsCycleTime = std::stoi(settings["RDSCycleTime"]);
 
-        std::string freq = settings["Frequency"];
-        float ffreq = std::stof(freq);
+        detected = qn8027.detect();
+        if (detected) {
+            std::unique_lock<std::mutex> lk(lock);
+            functions.emplace([this]() {
+                initializeQN8027();
+            });
 
-        std::string sc = settings["StationCode"];
-        while (sc.length() < 4) {
-            sc += "A";
+            lk.unlock();
+            stopAction();
+
+            formatAndSendText(settings["StationID"], "", "", "", 0, 0);
+            formatAndSendText(settings["RDS"], "", "", "", 0, 1);
+            formatAndSendText(settings["RDS2"], "", "", "", 0, 2);
+            formatAndSendText(settings["RDS3"], "", "", "", 0, 3);
+        } else {
+            WarningHolder::AddWarning("Could not detect QN8027 device.");
         }
-        uint8_t pt = std::stoi(settings["ProgramType"]);
-        uint8_t pe = std::stoi(settings["Preemphasis"]);
-        std::unique_lock<std::mutex> lk(lock);
-        functions.emplace([this, ffreq, sc, pt, pe]() {
-            qn8027.setChannel(ffreq);
-            qn8027.setPreemphasis(pe);
-            qn8027.setStationCode(sc);
-            qn8027.setProgramType(pt);
-            qn8027.startTransmit();            
-            qn8027.printInfo();
-        });
-
-        lk.unlock();
-        stopAction();
-
-        formatAndSendText(settings["StationID"], "", "", "", 0, 0);
-        formatAndSendText(settings["RDS"], "", "", "", 0, 1);
-        formatAndSendText(settings["RDS2"], "", "", "", 0, 2);
-        formatAndSendText(settings["RDS3"], "", "", "", 0, 3);
         sendThread = new std::thread([this] () {this->run();});
         condition.notify_all();
     }
 
     virtual ~FPPKFMTPlugin() {
-        functions.emplace([this]() {
-            qn8027.stopTransmit();
-        });
+        if (detected) {
+            functions.emplace([this]() {
+                qn8027.stopTransmit();
+            });
+        }
         condition.notify_all();
         std::unique_lock<std::mutex> lk(lock);
         while (!functions.empty()) {
@@ -99,53 +90,82 @@ public:
         }
         delete sendThread;
     }
+    virtual void settingChanged(const std::string& key, const std::string& value) override {
+        printf("Setting changed %s = %s\n", key.c_str(), value.c_str());
+        if (key == "IdleAction") {
+            // keys that don't need to reset the radio
+            return;
+        } else if (key == "StationID") {
+            formatAndSendText(settings["StationID"], "", "", "", 0, 0);
+        } else if (key == "RDS" || key == "RDS2" || key == "RDS3") {
+            // these will be sent on the next appropriate cycle
+            return;
+        } else if (key == "StationIDTime") {
+            stationIdCycleTime = std::stoi(settings["StationIDTime"]);
+        } else if (key == "RDSCycleTime") {
+            rdsCycleTime = std::stoi(settings["RDSCycleTime"]);
+        } else if (detected) {
+            std::unique_lock<std::mutex> lk(lock);
+            functions.emplace([this] () {
+                initializeQN8027();
+            });
+            lk.unlock();
+        }
+    }
 
-    void initialize() {
+    void initializeQN8027() {
+        if (!detected) {
+            return;
+        }
         printf("Initializing QN8027\n");
         qn8027.reset();
-        std::this_thread::sleep_for(std::chrono::microseconds(30));
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
 
-/*
-        qn8027.setClockSource(0x00); // XTAL on pins 1 & 2.
-        qn8027.setCrystalFreq(12);
-        qn8027.setCrystalCurrent(30); // 30% of 400uA Max = 120uA.
-        qn8027.setTxFreqDeviation(0x81); // 75Khz, Total Broadcast channel Bandwidth
-        qn8027.setTxPilotFreqDeviation(9); // Use default 9% (6.75KHz) Pilot Tone Deviation.
-        qn8027.setRfPower();
-        for (uint8_t i = 0; i < RADIO_CAL_RETRY; i++) { // Allow several attempts to get good port matching results.
-            if (calibrateAntenna()) {                   // QN8027 RF Port Matching OK, exit.
-                testCode = FM_TEST_OK;
-                break;
-            } else {
-                testCode = FM_TEST_VSWR; // Report High VSWR.
-                if (i < RADIO_CAL_RETRY - 1) {
-                    sprintf(logBuff, "-> Retesting QN8027 RF Port Matching, Retry #%d", i + 1);
-                    Log.warningln(logBuff);
-                }
-            }
+        std::string freq = settings["Frequency"];
+        float ffreq = std::stof(freq);
+
+        std::string sc = settings["StationCode"];
+        while (sc.length() < 4) {
+            sc += "A";
         }
-         setPreEmphasis();
-        setVgaGain(); // Tx Input Buffer Gain.
-        setDigitalGain();
-        setAudioImpedance();
-        radio.MonoAudio(!stereoEnbFlg);
-        delay(5);
-        radio.scrambleAudio(OFF);
-        radio.clearAudioPeak();
-        radio.mute(muteFlg);
-        setRfAutoOff();
-        radio.Switch(uint8_t(rfCarrierFlg));
+        uint8_t pt = std::stoi(settings["ProgramType"]);
+        uint8_t pe = std::stoi(settings["Preemphasis"]);
+
+        qn8027.setChannel(ffreq);
+        qn8027.setPreemphasis(pe);
+        qn8027.setStationCode(sc);
+        qn8027.setProgramType(pt);
+
+        uint8_t inputImpd = std::stoi(settings["InputImpedance"]);
+        qn8027.setAudioInpImp(inputImpd);
+
+        uint8_t ibg = std::stoi(settings["TXInputBufferGain"]);
+        qn8027.setTxInputBufferGain(ibg);
+
+        uint8_t dg = std::stoi(settings["TXDigitalGain"]);
+        qn8027.setTxDigitalGain(dg);
+
+        // need range of 20 to 75
+        float tp = std::stof(settings["TransmitPower"]);
+        tp /= 55.0f;
+        tp += 20;
+        qn8027.setTxPower(std::round(tp));
 
 
-        radio.setFrequency((float(fmFreqX10)) / 10.0f);
-        radio.setRDSFreqDeviation(10); // RDS Freq Deviation = 0.35KHz * Value.
-        radio.RDS(ON);
+        qn8027.RDS(1); // Enable RDS
 
-        radio.updateSYSTEM_REG(); // This is needed to Start FM Broadcast.
-        radio.clearAudioPeak();
-        radio.setPiCode(rdsLocalPiCode);
-        radio.setPtyCode(rdsLocalPtyCode);
-    */
+        qn8027.startTransmit();            
+        qn8027.printInfo();
+/*
+
+        setIfNotFound("TXFreqDeviation", "129");
+        setIfNotFound("RDSFreqDeviation", "10");
+        setIfNotFound("TXPilotFreqDeviation", "9");
+        void setTxFreqDeviation(uint8_t Fdev);
+        void setRDSFreqDeviation(uint8_t RDSFreqDev);
+        void setTxPilotFreqDeviation(uint8_t PGain);
+*/
+
     }
 
     void run() {
@@ -154,9 +174,11 @@ public:
             uint64_t ct = GetTimeMS();
             if (ct > nextStationTime && curStationIdString < stationIdStrings.size()) {
                 std::string s = stationIdStrings[curStationIdString];
-                functions.emplace([this, s]() {
-                    qn8027.sendStationName(s);
-                });
+                if (detected) {
+                    functions.emplace([this, s]() {
+                        qn8027.sendStationName(s);
+                    });
+                }
 
                 curStationIdString++;
                 if (curStationIdString >= stationIdStrings.size()) {
@@ -169,9 +191,11 @@ public:
                 if (s == "") {
                     s = std::string(" ");
                 }
-                functions.emplace([this, s]() {
-                    qn8027.sendRadioText(s);
-                });
+                if (detected) {
+                    functions.emplace([this, s]() {
+                        qn8027.sendRadioText(s);
+                    });
+                }
                 curRDSString++;
                 if (curRDSString == 3 || rdsStrings[curRDSString] == "") {
                     curRDSString = 0;
@@ -193,33 +217,37 @@ public:
         }
     }
     void startAction() {
-        if (settings["IdleAction"] == "1") {
-            std::unique_lock<std::mutex> lk(lock);
-            functions.emplace([this]() {
-                qn8027.unmute();
-            });
-        } else if (settings["IdleAction"] == "2") {
-            std::unique_lock<std::mutex> lk(lock);
-            functions.emplace([this]() {
-                qn8027.startTransmit();
-            });
+        if (detected) {
+            if (settings["IdleAction"] == "1") {
+                std::unique_lock<std::mutex> lk(lock);
+                functions.emplace([this]() {
+                    qn8027.unmute();
+                });
+            } else if (settings["IdleAction"] == "2") {
+                std::unique_lock<std::mutex> lk(lock);
+                functions.emplace([this]() {
+                    qn8027.startTransmit();
+                });
+            }
+            condition.notify_all();
         }
-        condition.notify_all();
     }
    
     void stopAction() {
-        if (settings["IdleAction"] == "1") {
-            std::unique_lock<std::mutex> lk(lock);
-            functions.emplace([this]() {
-                qn8027.mute();
-            });
-        } else if (settings["IdleAction"] == "2") {
-            std::unique_lock<std::mutex> lk(lock);
-            functions.emplace([this]() {
-                qn8027.stopTransmit();
-            });
+        if (detected) {
+            if (settings["IdleAction"] == "1") {
+                std::unique_lock<std::mutex> lk(lock);
+                functions.emplace([this]() {
+                    qn8027.mute();
+                });
+            } else if (settings["IdleAction"] == "2") {
+                std::unique_lock<std::mutex> lk(lock);
+                functions.emplace([this]() {
+                    qn8027.stopTransmit();
+                });
+            }
+            condition.notify_all();
         }
-        condition.notify_all();
     }
     
     static void padTo(std::string &s, int l) {
@@ -288,18 +316,22 @@ public:
                 std::string m = "        ";
                 fragments.push_back(m);
             }
-            std::unique_lock<std::mutex> lk(lock);
-            stationIdStrings = fragments;
-            curStationIdString = 0;
-            lk.unlock();
-            condition.notify_all();
+            if (detected) {
+                std::unique_lock<std::mutex> lk(lock);
+                stationIdStrings = fragments;
+                curStationIdString = 0;
+                lk.unlock();
+                condition.notify_all();
+            }
         } else {
             LogDebug(VB_PLUGIN, "Setting RDS %d text to \"%s\"\n", location, output.c_str());
-            std::unique_lock<std::mutex> lk(lock);
-            rdsStrings[location - 1] = output;
-            curRDSString = 0;
-            lk.unlock();
-            condition.notify_all();
+            if (detected) {
+                std::unique_lock<std::mutex> lk(lock);
+                rdsStrings[location - 1] = output;
+                curRDSString = 0;
+                lk.unlock();
+                condition.notify_all();
+            }
         }
     }
     
@@ -355,6 +387,15 @@ public:
         setIfNotFound("StationIDTime", "5");
         setIfNotFound("ProgramType", "0");
         setIfNotFound("StationCode", "WFPP");
+
+        setIfNotFound("TXInputBufferGain", "3");
+        setIfNotFound("TXDigitalGain", "0");
+        setIfNotFound("InputImpedance", "20");
+        setIfNotFound("TransmitPower", "100");
+
+        setIfNotFound("TXFreqDeviation", "129");
+        setIfNotFound("RDSFreqDeviation", "10");
+        setIfNotFound("TXPilotFreqDeviation", "9");
     }
     void setIfNotFound(const std::string &s, const std::string &v, bool emptyAllowed = false) {
         if (settings.find(s) == settings.end()) {
@@ -367,7 +408,7 @@ public:
 };
 
 extern "C" {
-    FPPPlugin *createPlugin() {
+    FPPPlugins::Plugin *createPlugin() {
         return new FPPKFMTPlugin();
     }
 }

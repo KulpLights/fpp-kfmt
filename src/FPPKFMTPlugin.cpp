@@ -31,21 +31,23 @@ public:
     std::queue<std::function<void()>> functions;
 
     uint32_t stationIdCycleTime = 5;
-    uint32_t rdsCycleTime = 15;
 
     std::vector<std::string> stationIdStrings;
     int curStationIdString = 0;
     uint64_t nextStationTime = 0;
 
-    std::array<std::string, 3> rdsStrings;
-    int curRDSString = 0;
     uint64_t nextRDSTime = 0;
+
+    std::string title;
+    std::string artist;
+    std::string album;
+    int track = 0;
+    int mediaLength = 0;
 
     FPPKFMTPlugin() : FPPPlugins::Plugin("fpp-kfmt", true), FPPPlugins::PlaylistEventPlugin() {
         setDefaultSettings();
 
         stationIdCycleTime = std::stoi(settings["StationIDTime"]);
-        rdsCycleTime = std::stoi(settings["RDSCycleTime"]);
 
         detected = qn8027.detect();
         if (detected) {
@@ -57,10 +59,7 @@ public:
             lk.unlock();
             stopAction();
 
-            formatAndSendText(settings["StationID"], "", "", "", 0, 0);
-            formatAndSendText(settings["RDS"], "", "", "", 0, 1);
-            formatAndSendText(settings["RDS2"], "", "", "", 0, 2);
-            formatAndSendText(settings["RDS3"], "", "", "", 0, 3);
+            formatAndSendText(settings["StationID"], 0);
         } else {
             WarningHolder::AddWarning("Could not detect QN8027 device.");
         }
@@ -96,14 +95,12 @@ public:
             // keys that don't need to reset the radio
             return;
         } else if (key == "StationID") {
-            formatAndSendText(settings["StationID"], "", "", "", 0, 0);
-        } else if (key == "RDS" || key == "RDS2" || key == "RDS3") {
+            formatAndSendText(settings["StationID"], 0);
+        } else if (key == "StationName" || key == "StationURL") {
             // these will be sent on the next appropriate cycle
             return;
         } else if (key == "StationIDTime") {
             stationIdCycleTime = std::stoi(settings["StationIDTime"]);
-        } else if (key == "RDSCycleTime") {
-            rdsCycleTime = std::stoi(settings["RDSCycleTime"]);
         } else if (detected) {
             std::unique_lock<std::mutex> lk(lock);
             functions.emplace([this] () {
@@ -187,22 +184,17 @@ public:
                 nextStationTime = ct + stationIdCycleTime * 1000;
             }
             if (ct > nextRDSTime) {
-                std::string s = rdsStrings[curRDSString];
-                if (s == "") {
-                    s = std::string(" ");
-                }
                 if (detected) {
-                    functions.emplace([this, s]() {
-                        qn8027.sendRadioText(s);
+                    functions.emplace([this]() {
+                        if (title.empty() && artist.empty() && album.empty()) {
+                            qn8027.sendStationRadioTextPlus(settings["StationName"], settings["StationURL"]);
+                        } else {
+                            qn8027.sendItemRadioTextPlus(artist, title, album);
+                        }
                     });
                 }
-                curRDSString++;
-                if (curRDSString == 3 || rdsStrings[curRDSString] == "") {
-                    curRDSString = 0;
-                }
-                nextRDSTime = ct + rdsCycleTime * 1000;
+                nextRDSTime = ct + 4000; // every 4 seconds
             }
-
             while (!functions.empty()) {
                 std::string resp;
                 auto f = functions.front();
@@ -257,7 +249,7 @@ public:
         }
     }
 
-    void formatAndSendText(const std::string &text, const std::string &artist, const std::string &title, const std::string &album, int length, int location) {
+    void formatAndSendText(const std::string &text, int location) {
         std::string output;
         
         int artistIdx = -1;
@@ -327,8 +319,7 @@ public:
             LogDebug(VB_PLUGIN, "Setting RDS %d text to \"%s\"\n", location, output.c_str());
             if (detected) {
                 std::unique_lock<std::mutex> lk(lock);
-                rdsStrings[location - 1] = output;
-                curRDSString = 0;
+                //rdsStrings[location - 1] = output;
                 lk.unlock();
                 condition.notify_all();
             }
@@ -336,39 +327,52 @@ public:
     }
     
     virtual void playlistCallback(const Json::Value &playlist, const std::string &action, const std::string &section, int item) {
-        if (action == "stop") {
-            formatAndSendText(settings["StationID"], "", "", "", 0, 0);
-            formatAndSendText(settings["RDS"], "", "", "", 0, 1);
-            formatAndSendText(settings["RDS2"], "", "", "", 0, 2);
-            formatAndSendText(settings["RDS3"], "", "", "", 0, 3);
-            nextRDSTime = 0;
-            nextStationTime = 0;
-        }
         if (action == "start") {
             startAction();
         } else if (action == "stop") {
+            std::unique_lock<std::mutex> lk(lock);
+            functions.emplace([this]() {
+                qn8027.disableRadioTextPlus();
+            });
+            lk.unlock();
+            artist.clear();
+            title.clear();
+            album.clear();
+            track = 0;
+            mediaLength = 0;
+            formatAndSendText(settings["StationID"], 0);
+            nextRDSTime = 0;
+            nextStationTime = 0;
+            
             stopAction();
         }
         
     }
     virtual void mediaCallback(const Json::Value &playlist, const MediaDetails &mediaDetails) {
-        std::string title = mediaDetails.title;
-        std::string artist = mediaDetails.artist;
-        std::string album = mediaDetails.album;
-        int track = mediaDetails.track;
-        int length = mediaDetails.length;
+        title = mediaDetails.title;
+        artist = mediaDetails.artist;
+        album = mediaDetails.album;
+        track = mediaDetails.track;
+        mediaLength = mediaDetails.length;
         
         std::string type = playlist["currentEntry"]["type"].asString();
         if (type != "both" && type != "media") {
             title = "";
             artist = "";
             album = "";
+            track = 0;
+            mediaLength = 0;
         }
-        
-        formatAndSendText(settings["StationID"], artist, title, album, length, 0);
-        formatAndSendText(settings["RDS"], artist, title, album, length, 1);
-        formatAndSendText(settings["RDS2"], artist, title, album, length, 2);
-        formatAndSendText(settings["RDS3"], artist, title, album, length, 3);
+        std::unique_lock<std::mutex> lk(lock);
+        functions.emplace([this]() {
+            if (title.empty() && artist.empty() && album.empty()) {
+                qn8027.sendStationRadioTextPlus(settings["StationName"], settings["StationURL"]);
+            } else {
+                qn8027.sendItemRadioTextPlus(artist, title, album);
+            }
+        });
+        lk.unlock();
+        formatAndSendText(settings["StationID"], 0);
         nextRDSTime = 0;
         nextStationTime = 0;
     }
@@ -380,10 +384,8 @@ public:
         setIfNotFound("Preemphasis", "1");
 
         setIfNotFound("StationID", "Merry   Christ- mas", true);        
-        setIfNotFound("RDS", "[{Artist} - {Title}]", true);
-        setIfNotFound("RDS2", "", true);
-        setIfNotFound("RDS3", "", true);
-        setIfNotFound("RDSCycleTime", "15");
+        setIfNotFound("StationName", "", true);
+        setIfNotFound("StationURL", "", true);
         setIfNotFound("StationIDTime", "5");
         setIfNotFound("ProgramType", "0");
         setIfNotFound("StationCode", "WFPP");

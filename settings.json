@@ -19,10 +19,8 @@
                 "StationCode",
                 "StationID",
                 "StationIDTime",
-                "RDS",
-                "RDS2",
-                "RDS3",
-                "RDSCycleTime"
+                "StationName",
+                "StationURL"
             ]   
         }
     },
@@ -68,7 +66,7 @@
         "StationID": {
             "name": "StationID",
             "description": "Station ID",
-            "tip": "Station Identifier",
+            "tip": "Station Identifier, broken into 8 character sections when sent.",
             "restart": 0,
             "reboot": 0,
             "type": "text",
@@ -87,49 +85,27 @@
             "min": 1,
             "max": 60
         },
-        "RDS": {
-            "name": "RDS",
-            "description": "RDS String",
-            "tip": "RDS String.",
+        "StationName": {
+            "name": "StationName",
+            "description": "Station Name",
+            "tip": "Longer Station Name for RT+.  Max of 60 characters.",
             "restart": 0,
             "reboot": 0,
             "type": "text",
-            "default": "[{Artist} - {Title}]",
-            "size": 30,
-            "maxlength": 100
+            "default": "Merry Christmas FM",
+            "size": 60,
+            "maxlength": 60
         },
-        "RDS2": {
-            "name": "RDS2",
-            "description": "RDS String #2",
-            "tip": "RDS String #2.",
-            "restart": 0,
-            "reboot": 0,
-            "type": "text",
-            "default": "",
-            "size": 30,
-            "maxlength": 100
-        },
-        "RDS3": {
-            "name": "RDS3",
-            "description": "RDS String #3",
-            "tip": "RDS String #3.",
+        "StationURL": {
+            "name": "StationURL",
+            "description": "Station URL",
+            "tip": "Station Homepage URL for RT+.  Max of 60 characters.",
             "restart": 0,
             "reboot": 0,
             "type": "text",
             "default": "",
-            "size": 30,
-            "maxlength": 100
-        },
-        "RDSCycleTime": {
-            "name": "RDSCycleTime",
-            "description": "RDS Cycle Time",
-            "tip": "Time (s) that each RDS string is displayed.",
-            "restart": 0,
-            "reboot": 0,
-            "type": "number",
-            "default": 15,
-            "min": 1,
-            "max": 300
+            "size": 60,
+            "maxlength": 60
         },
         "StationCode": {
             "name": "StationCode",

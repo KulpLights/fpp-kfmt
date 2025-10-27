@@ -360,6 +360,7 @@ void QN8027::sendStationName(const std::string &sn) {
     int str_len = strlen(char_array);
 	int rds_len = str_len + (str_len % 2);    // Make it a multiple of 2.
 
+    LogDebug(VB_PLUGIN, "Sending RDS Station ID: \"%s\"\n", sn.c_str());
 	for(int i = 0; i < rds_len; i += 2) {
         uint8_t ptyHi = (ptyCode & 0x18) >> 3; //top 2 bits of PTY are in bottom 2 bits of byte 3
         uint8_t ptyLo = (ptyCode << 5) & 0xE0; //bottom 3 bits of PTY are in top 3 bits of byte 4
@@ -371,9 +372,11 @@ void QN8027::sendStationName(const std::string &sn) {
 
 }
 void QN8027::sendRadioText(const std::string &rt) {
+    LogDebug(VB_PLUGIN, "Sending RDS Radio Text: \"%s\"\n", rt.c_str());
     char char_array[65];
+    memset(char_array, 0, sizeof(char_array));
     strncpy(char_array, rt.c_str(), sizeof(char_array));
-    int str_len = strlen(char_array);
+    int str_len = strlen(char_array) + 1;
 	int rds_len = str_len + (str_len % 2);    // Make it a multiple of 2.
 
 	for (int i = 0; i < rds_len; i += 4) {
@@ -387,3 +390,203 @@ void QN8027::sendRadioText(const std::string &rt) {
 }
 
 
+void QN8027::sendRTPlusSegments(std::string &rt, std::vector<std::tuple<uint8_t, uint8_t, uint8_t>> &rtPlusSegments, bool enable) {
+    uint8_t ptyHi = (ptyCode & 0x18) >> 3; //top 2 bits of PTY are in bottom 2 bits of byte 3
+    uint8_t ptyLo = (ptyCode << 5) & 0xE0; //bottom 3 bits of PTY are in top 3 bits of byte 4
+
+    while (!rt.empty()) {
+        int maxSeg = rtPlusSegments.size() - 1;
+        int maxIdx = rt.length();
+        for (int x = 1; x < rtPlusSegments.size(); x++) {
+            auto segment = rtPlusSegments[x];
+            if (std::get<0>(segment) + std::get<1>(segment) > 63) {
+                // segment won't fit in this send
+                maxSeg = x - 1;
+                maxIdx = std::get<0>(rtPlusSegments[maxSeg]) + std::get<1>(rtPlusSegments[maxSeg]);
+            }
+        }
+        std::string rt2 = rt.substr(0, maxIdx);
+        sendRadioText(rt2);
+
+        int numSend = 2;
+        for (int x = 0; x < maxSeg; x += numSend) {
+            auto segment = rtPlusSegments[x];
+            uint8_t idx = std::get<0>(segment);
+            uint8_t len = std::get<1>(segment);
+            uint8_t type = std::get<2>(segment);
+
+            std::tuple<uint8_t, uint8_t, uint8_t> nextSegment = {0,0,0};
+            numSend = 2;
+            if (len < 32 && x + 1 <= maxSeg) {
+                nextSegment = rtPlusSegments[x + 1];
+                // first segment is less than 32 so can fit in second if required
+                // if second segment is longer than 32 then swap them
+                if (std::get<1>(nextSegment) >= 32) {
+                    std::swap(segment, nextSegment);
+                }                
+            } else if (x + 1 > maxSeg) {
+                // first segment is longer than 32 so must be in first position
+                nextSegment = rtPlusSegments[x + 1];                
+            } else {
+                numSend = 1;
+            }
+
+            uint8_t idx1 = std::get<0>(segment) & 0x3F;
+            uint8_t len1 = std::get<1>(segment) & 0x3F;
+            uint8_t type1 = std::get<2>(segment) & 0x3F;
+
+            uint8_t idx2 = std::get<0>(nextSegment) & 0x3F;
+            uint8_t len2 = std::get<1>(nextSegment) & 0x3F;
+            uint8_t type2 = std::get<2>(nextSegment) & 0x1F;
+
+            uint8_t rb = rtPlusToggle ? 0x010 : 0x00; // RT+ toggle bit
+
+            sendRDS((piCode >> 8) * 0xFF, piCode & 0xFF, 
+                0x16 | ptyHi, ptyLo | rb | (type1 >> 3) & 0x07,
+                ((type1 & 0x07) << 5) | (idx1 >> 1) , (idx1 & 0x01) << 7 | (len1 << 1) | (type2 & 0x20) ? 0x01 : 0x00,
+                ((type2 & 0x1F) << 3) | (idx2 >> 3), ((idx2 << 5) & 0xE0 ) | len2);
+            waitForRDSSend();
+        }
+
+        rt.erase(0, rt2.length());
+        //remove the segments that were sent
+        for (int i = 0; i <= maxSeg; i++) {
+            rtPlusSegments.erase(rtPlusSegments.begin());
+        }
+        // adjust the remaining segments to account for sent text
+        for (int i = 0; i < rtPlusSegments.size(); i++) {
+            auto &segment = rtPlusSegments[i];
+            std::get<0>(segment) -= rt2.length();
+        }
+    }
+
+    if (enable) {
+        uint8_t rb = rtPlusToggle ? 0x018 : 0x08; // RT+ toggle bit and "running bit"
+        sendRDS((piCode >> 8) * 0xFF, piCode & 0xFF, 
+            0x16 | ptyHi, ptyLo | rb,
+            0x00, 0x00,
+            0x00, 0x00);
+    }
+}
+
+void QN8027::sendStationRadioTextPlus(const std::string &stationName,
+                                const std::string &homepage) {
+    uint8_t ptyHi = (ptyCode & 0x18) >> 3; //top 2 bits of PTY are in bottom 2 bits of byte 3
+    uint8_t ptyLo = (ptyCode << 5) & 0xE0; //bottom 3 bits of PTY are in top 3 bits of byte 4
+    sendRDS((piCode >> 8) * 0xFF, piCode & 0xFF, 
+            0x30 | ptyHi, ptyLo | 0x16,
+            0x00, 0x00,
+            0x4B, 0xD7);
+    waitForRDSSend();
+
+    std::string rt;
+    int stationNameLen = 1;
+    int homepageLen = 1;
+
+    int stationNameIdx = rt.length();
+    if (!stationName.empty()) {
+        stationNameLen = stationName.length();
+        rt += stationName;
+    } else {
+        rt += " ";
+    }
+    int homepageIdx = rt.length();
+    if (!homepage.empty()) {
+        rt += " - ";
+        homepageLen = homepage.length();
+        rt += homepage;
+    } else {
+        rt += " ";
+    }
+
+    std::vector<std::tuple<uint8_t, uint8_t, uint8_t>> rtPlusSegments;
+    rtPlusSegments.emplace_back(stationNameIdx, stationNameLen, RT_PLUS_STATIONNAME);
+    rtPlusSegments.emplace_back(homepageIdx, homepageLen, RT_PLUS_HOMEPAGE);
+    sendRTPlusSegments(rt, rtPlusSegments, false);                                    
+}
+void QN8027::sendItemRadioTextPlus(const std::string &artist,
+                            const std::string &title,
+                            const std::string &album) {
+    rtPlusToggle = !rtPlusToggle;
+
+    uint8_t ptyHi = (ptyCode & 0x18) >> 3; //top 2 bits of PTY are in bottom 2 bits of byte 3
+    uint8_t ptyLo = (ptyCode << 5) & 0xE0; //bottom 3 bits of PTY are in top 3 bits of byte 4
+    sendRDS((piCode >> 8) * 0xFF, piCode & 0xFF, 
+            0x30 | ptyHi, ptyLo | 0x16,
+            0x00, 0x00,
+            0x4B, 0xD7);
+    waitForRDSSend();
+
+    std::string rt;
+    int titleLen = 1;
+    int albumLen = 1;
+    int artistLen = 1;
+    int stationNameLen = 1;
+    int homepageLen = 1;
+
+    int titleIdx = rt.length();
+    if (!title.empty()) {
+        titleLen = title.length();
+        rt += title;
+    } else {
+        rt += " ";
+    }
+    int artistIdx = rt.length();
+    if (!artist.empty()) {
+        rt += " - ";
+        artistIdx = rt.length();
+        artistLen = artist.length();
+        rt += artist;
+    } else {
+        rt += " ";
+    }           
+    int albumIdx = rt.length();
+    if (albumIdx > 63) {
+        artistLen = 63 - artistIdx + 1;
+        rt.resize(63);
+        albumLen = 1;
+        albumIdx = rt.length();
+        rt += " ";
+    } else {
+        if (!album.empty()) {
+            if (rt.length() + album.length() + 3 > 64) {
+                // not enough space to add album
+                albumLen = 1;
+                rt += " ";
+            } else {
+                rt += " - ";
+                albumIdx = rt.length();
+                albumLen = album.length();
+                rt += album;
+            }
+        } else {
+            rt += " ";
+        }
+    }
+
+    rtPlusToggle = !rtPlusToggle;
+    std::vector<std::tuple<uint8_t, uint8_t, uint8_t>> rtPlusSegments;
+    rtPlusSegments.emplace_back(titleIdx, titleLen, RT_PLUS_TITLE);
+    rtPlusSegments.emplace_back(artistIdx, artistLen, RT_PLUS_ARTIST);
+    rtPlusSegments.emplace_back(albumIdx, albumLen, RT_PLUS_ALBUM);
+    sendRTPlusSegments(rt, rtPlusSegments, !title.empty() || !album.empty() || !artist.empty());
+}
+
+
+void QN8027::disableRadioTextPlus() {
+    LogDebug(VB_PLUGIN, "Disabling RDS RT+\n");
+
+    uint8_t ptyHi = (ptyCode & 0x18) >> 3; //top 2 bits of PTY are in bottom 2 bits of byte 3
+    uint8_t ptyLo = (ptyCode << 5) & 0xE0; //bottom 3 bits of PTY are in top 3 bits of byte 4
+    sendRDS((piCode >> 8) * 0xFF, piCode & 0xFF, 
+            0x30 | ptyHi, ptyLo | 0x16,
+            0x00, 0x00,
+            0x4B, 0xD7);
+    waitForRDSSend();
+
+
+    sendRDS((piCode >> 8) * 0xFF, piCode & 0xFF, 
+        0x16 | ptyHi, ptyLo,  //item running bit is off, rest is irrelevant
+        0x00, 0x00,
+        0x00, 0x00);
+}

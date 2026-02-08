@@ -6,12 +6,7 @@
 #include <cstring>
 
 #include "log.h"
-
-#ifdef PLATFORM_PI
-constexpr int I2CBus = 1;
-#else
-constexpr int I2CBus = 2;
-#endif
+#include "common_mini.h"
 
 constexpr uint8_t REG_SYSTEM = 0x00; // Sets device modes.
 constexpr uint8_t REG_CH1 = 0x01;     // Sets the channel frequency
@@ -49,29 +44,48 @@ const char * mapFSM(uint8_t fsm) {
 
 
 
-QN8027::QN8027() :  i2c(I2CBus, 0x2c) {
+QN8027::QN8027() {
+
+    for (int x = 1; x < 10; x++) {
+        if (FileExists("/dev/i2c-" + std::to_string(x))) {
+            i2c = new I2CUtils(x, 0x2c);
+            if (detect()) {
+                break;
+            } else {
+                delete i2c;
+                i2c = nullptr;
+            }
+        }
+    }   
     channel = 87.9f;
     piCode = 0;
     ptyCode = 0;
 }
 
 QN8027::~QN8027() {
-
+    if (i2c) {
+        delete i2c;
+        i2c = nullptr;
+    }
 }
 
 bool QN8027::detect() {
-    uint8_t cid1 = i2c.readByteData(REG_CID1);
-    uint8_t cid2 = i2c.readByteData(REG_CID2);
+    uint8_t cid1 = i2c->readByteData(REG_CID1);
+    uint8_t cid2 = i2c->readByteData(REG_CID2);
     LogDebug(VB_PLUGIN, "CID1: %02X   CID2: %02X\n", cid1, cid2);
     return cid1 != 0 && cid1 != 0xFF && cid2 != 0 && cid2 != 0xFF;
 }
 
 void QN8027::write1Byte(uint8_t regAddr, uint8_t data) {
-    i2c.writeByteData(regAddr, data);
+    i2c->writeByteData(regAddr, data);
+}
+uint8_t QN8027::read1Byte(uint8_t regAddr) {
+    return i2c->readByteData(regAddr);
 }
 
+
 void QN8027::sendRDS(uint8_t by0, uint8_t by1, uint8_t by2, uint8_t by3, uint8_t by4, uint8_t by5, uint8_t by6, uint8_t by7) {    
-    statusReg.byte = i2c.readByteData(REG_STATUS);
+    statusReg.byte = read1Byte(REG_STATUS);
     write1Byte(REG_RDSD0, by0);
     write1Byte(REG_RDSD1, by1);
     write1Byte(REG_RDSD2, by2);
@@ -124,7 +138,7 @@ void QN8027::waitForIdle(int maxms) {
     StatusReg sr1;
     int waited = 0;
     do {
-        sr1.byte = i2c.readByteData(REG_STATUS);
+        sr1.byte = read1Byte(REG_STATUS);
         if (sr1.fields.fsm == 2 || sr1.fields.fsm == 5) {
             // 2 is idle, 5 is carrier off
             return;
@@ -137,7 +151,7 @@ void QN8027::waitForIdle(int maxms) {
 
 void QN8027::calibrate() {
     StatusReg sr1;
-    sr1.byte = i2c.readByteData(REG_STATUS);
+    sr1.byte = read1Byte(REG_STATUS);
 
     systemReg.fields.recalibrate = 1;
     systemReg.fields.radioStatus = 1;
@@ -146,7 +160,7 @@ void QN8027::calibrate() {
 
     int waited = 0;
     do {
-        sr1.byte = i2c.readByteData(REG_STATUS);
+        sr1.byte = read1Byte(REG_STATUS);
         if (sr1.fields.fsm == 2 || sr1.fields.fsm == 5 || sr1.fields.fsm == 0) {
             // 2 is idle, 5 is transmitting, 0 is reset
             break;
@@ -200,8 +214,8 @@ void QN8027::setChannel(float frequency) {
     waitForIdle(50);
 }
 float QN8027::getChannel() {
-    uint8_t frequencyH = i2c.readByteData(REG_SYSTEM) & 0x03;
-	uint8_t frequencyL = i2c.readByteData(REG_CH1);
+    uint8_t frequencyH = read1Byte(REG_SYSTEM) & 0x03;
+	uint8_t frequencyL = read1Byte(REG_CH1);
 	float freqCombine = (float)(((frequencyH<<8) | frequencyL)*5+7600)/100;
 	return freqCombine;
 }
@@ -303,14 +317,14 @@ void QN8027::setTxPower(uint8_t setX) {
 
 
 void QN8027::printInfo() {
-    statusReg.byte = i2c.readByteData(REG_STATUS);
+    statusReg.byte = read1Byte(REG_STATUS);
 
     LogInfo(VB_PLUGIN, "Status: %02X   \n", statusReg.byte);
     LogInfo(VB_PLUGIN, "  Channel: %0.2f MHz\n", getChannel());
     LogInfo(VB_PLUGIN, "  Audio Peak: %d\n", statusReg.fields.audioPeak);
     LogInfo(VB_PLUGIN, "  FSM: %1X  %s\n", statusReg.fields.fsm, mapFSM(statusReg.fields.fsm));
     LogInfo(VB_PLUGIN, "  RDS Sent Status: %d\n", statusReg.fields.rdsSentStatus);
-    uint8_t ant = i2c.readByteData(REG_ANT);
+    uint8_t ant = read1Byte(REG_ANT);
     LogInfo(VB_PLUGIN, "  Antenna Tuning: %02X\n", ant);
 }
 
@@ -345,7 +359,7 @@ void QN8027::waitForRDSSend(){
     StatusReg status = statusReg;
     uint8_t timeout = 0;
     do {
-        status.byte = i2c.readByteData(REG_STATUS);
+        status.byte = read1Byte(REG_STATUS);
         if(timeout++ > (100/RDS_SEND_DELAY)) {  // Allow up to 100mS RDS Send time.
             break;
         }

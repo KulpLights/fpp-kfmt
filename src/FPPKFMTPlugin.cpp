@@ -114,7 +114,7 @@ public:
         if (!detected) {
             return;
         }
-        printf("Initializing QN8027\n");
+        LogInfo(VB_PLUGIN, "Initializing QN8027\n");
         qn8027.reset();
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
 

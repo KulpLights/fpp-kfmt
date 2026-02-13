@@ -1,0 +1,20 @@
+{
+  "configurations": [
+    {
+      "name": "linux-clang-arm64",
+      "includePath": [
+        "${workspaceFolder}/**",
+        "${workspaceFolder}/src",
+        "/usr/include",
+        "/usr/include/hidapi",
+        "/opt/fpp/src"
+      ],
+      "defines": ["PLATFORM_PI"],
+      "compilerPath": "/usr/bin/g++",
+      "cStandard": "c17",
+      "cppStandard": "c++20",
+      "intelliSenseMode": "linux-clang-arm64"
+    }
+  ],
+  "version": 4
+}

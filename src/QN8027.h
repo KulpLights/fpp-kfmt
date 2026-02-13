@@ -2,6 +2,7 @@
 #include <vector>
 #include <tuple>
 #include "util/I2CUtils.h"
+#include "CP2112.h"
 
 
 // RT+ info:
@@ -67,6 +68,7 @@ public:
     void waitForIdle(int maxms);
 private:
     I2CUtils *i2c = nullptr;
+    CP2112 *cp2112 = nullptr;
 
     void write1Byte(uint8_t regAddr, uint8_t data);
     uint8_t read1Byte(uint8_t regAddr);
@@ -148,3 +150,4 @@ private:
         } fields;
     } pacReg;
 };
+

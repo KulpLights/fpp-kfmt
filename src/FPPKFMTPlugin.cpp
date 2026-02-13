@@ -3,6 +3,9 @@
 #include <string>
 #include <vector>
 #include <queue>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
 
 #include <unistd.h>
 #include <termios.h>
@@ -16,270 +19,355 @@
 #include "QN8027.h"
 #include "Warnings.h"
 
+namespace {
+    int safeStoi(const std::string &s, int defVal, const char *name) {
+        try {
+            if (s.empty()) return defVal;
+            return std::stoi(s);
+        } catch (const std::exception &e) {
+            LogErr(VB_PLUGIN, "KFMT: stoi failed for %s=\"%s\": %s, using %d\n",
+                   name, s.c_str(), e.what(), defVal);
+            return defVal;
+        }
+    }
 
+    float safeStof(const std::string &s, float defVal, const char *name) {
+        try {
+            if (s.empty()) return defVal;
+            return std::stof(s);
+        } catch (const std::exception &e) {
+            LogErr(VB_PLUGIN, "KFMT: stof failed for %s=\"%s\": %s, using %0.2f\n",
+                   name, s.c_str(), e.what(), defVal);
+            return defVal;
+        }
+    }
 
-class FPPKFMTPlugin : public FPPPlugins::Plugin, public FPPPlugins::PlaylistEventPlugin {
+    void padTo(std::string &s, int l) {
+        size_t n = l - s.size();
+        if (n) s.append(n, ' ');
+    }
+}
+
+class FPPKFMTPlugin
+    : public FPPPlugins::Plugin
+    , public FPPPlugins::PlaylistEventPlugin {
 public:
     QN8027 qn8027;
-    bool detected = false;
-    
+    bool   detected = false;
 
-    volatile bool running = true;
-    std::mutex lock;
-    std::condition_variable condition;
-    std::thread *sendThread = nullptr;
+    std::atomic<bool> running{false};
+    std::mutex                    lock;
+    std::condition_variable       condition;
+    std::thread                   sendThread;
     std::queue<std::function<void()>> functions;
 
     uint32_t stationIdCycleTime = 5;
 
     std::vector<std::string> stationIdStrings;
-    int curStationIdString = 0;
-    uint64_t nextStationTime = 0;
-
-    uint64_t nextRDSTime = 0;
+    int       curStationIdString = 0;
+    uint64_t  nextStationTime    = 0;
+    uint64_t  nextRDSTime        = 0;
 
     std::string title;
     std::string artist;
     std::string album;
-    int track = 0;
-    int mediaLength = 0;
+    int         track       = 0;
+    int         mediaLength = 0;
 
-    FPPKFMTPlugin() : FPPPlugins::Plugin("fpp-kfmt", true), FPPPlugins::PlaylistEventPlugin() {
-        setDefaultSettings();
+    FPPKFMTPlugin()
+        : FPPPlugins::Plugin("fpp-kfmt", true)
+        , FPPPlugins::PlaylistEventPlugin() {
+        LogInfo(VB_PLUGIN, "KFMT: constructor start\n");
 
-        stationIdCycleTime = std::stoi(settings["StationIDTime"]);
+        // Absolutely no exceptions escape this constructor.
+        try {
+            setDefaultSettings();
 
-        detected = qn8027.detect();
-        if (detected) {
-            std::unique_lock<std::mutex> lk(lock);
-            functions.emplace([this]() {
-                initializeQN8027();
+            stationIdCycleTime = safeStoi(settings["StationIDTime"], 5, "StationIDTime");
+
+            detected = qn8027.detect();
+            if (!detected) {
+                WarningHolder::AddWarning("Could not detect QN8027 device.");
+            }
+
+            running = true;
+            sendThread = std::thread([this]() {
+                // Top‑level guard: nothing escapes this thread.
+                try {
+                    this->run();
+                } catch (const std::exception &e) {
+                    LogErr(VB_PLUGIN, "KFMT: run() top‑level exception: %s\n", e.what());
+                } catch (...) {
+                    LogErr(VB_PLUGIN, "KFMT: run() top‑level unknown exception\n");
+                }
             });
 
-            lk.unlock();
-            stopAction();
+            if (detected) {
+                {
+                    std::lock_guard<std::mutex> lk(lock);
+                    functions.emplace([this]() {
+                        initializeQN8027();
+                    });
+                }
+                stopAction();
+                formatAndSendText(settings["StationID"], 0);
+                condition.notify_all();
+            }
 
-            formatAndSendText(settings["StationID"], 0);
-        } else {
-            WarningHolder::AddWarning("Could not detect QN8027 device.");
+            LogInfo(VB_PLUGIN, "KFMT: constructor complete\n");
+        } catch (const std::exception &e) {
+            LogErr(VB_PLUGIN, "KFMT: constructor caught exception: %s\n", e.what());
+            // Leave running=false so thread (if started) will exit.
+            running = false;
+            condition.notify_all();
+        } catch (...) {
+            LogErr(VB_PLUGIN, "KFMT: constructor caught unknown exception\n");
+            running = false;
+            condition.notify_all();
         }
-        sendThread = new std::thread([this] () {this->run();});
-        condition.notify_all();
     }
 
     virtual ~FPPKFMTPlugin() {
-        if (detected) {
-            functions.emplace([this]() {
-                qn8027.stopTransmit();
-            });
-        }
-        condition.notify_all();
-        std::unique_lock<std::mutex> lk(lock);
-        while (!functions.empty()) {
-            lk.unlock();
-            condition.notify_all();
-            lk.lock();
-        }
+        LogInfo(VB_PLUGIN, "KFMT: destructor start\n");
+
+        // Never enqueue new work after we decide to shut down.
         running = false;
-        lk.unlock();
-        condition.notify_all();
-        if (sendThread->joinable()) {
-            condition.notify_all();
-            sendThread->join();
+
+        {
+            std::lock_guard<std::mutex> lk(lock);
+            if (detected) {
+                functions.emplace([this]() {
+                    try {
+                        qn8027.stopTransmit();
+                    } catch (const std::exception &e) {
+                        LogErr(VB_PLUGIN, "KFMT: exception in stopTransmit(): %s\n", e.what());
+                    } catch (...) {
+                        LogErr(VB_PLUGIN, "KFMT: unknown exception in stopTransmit()\n");
+                    }
+                });
+            }
         }
-        delete sendThread;
+        condition.notify_all();
+
+        if (sendThread.joinable()) {
+            sendThread.join();
+        }
+
+        LogInfo(VB_PLUGIN, "KFMT: destructor complete\n");
     }
-    virtual void settingChanged(const std::string& key, const std::string& value) override {
-        printf("Setting changed %s = %s\n", key.c_str(), value.c_str());
+
+    virtual void settingChanged(const std::string &key,
+                                const std::string &value) override {
+        LogInfo(VB_PLUGIN, "KFMT: Setting changed %s = %s\n",
+                key.c_str(), value.c_str());
+
         if (key == "IdleAction") {
-            // keys that don't need to reset the radio
             return;
         } else if (key == "StationID") {
             formatAndSendText(settings["StationID"], 0);
         } else if (key == "StationName" || key == "StationURL") {
-            // these will be sent on the next appropriate cycle
             return;
         } else if (key == "StationIDTime") {
-            stationIdCycleTime = std::stoi(settings["StationIDTime"]);
+            stationIdCycleTime = safeStoi(settings["StationIDTime"], 5, "StationIDTime");
         } else if (detected) {
-            std::unique_lock<std::mutex> lk(lock);
-            functions.emplace([this] () {
+            std::lock_guard<std::mutex> lk(lock);
+            functions.emplace([this]() {
                 initializeQN8027();
             });
-            lk.unlock();
+            condition.notify_all();
         }
     }
 
     void initializeQN8027() {
-        if (!detected) {
-            return;
-        }
+        if (!detected) return;
+
         LogInfo(VB_PLUGIN, "Initializing QN8027\n");
-        qn8027.reset();
-        std::this_thread::sleep_for(std::chrono::milliseconds(2));
 
-        std::string freq = settings["Frequency"];
-        float ffreq = std::stof(freq);
+        try {
+            qn8027.reset();
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
 
-        std::string sc = settings["StationCode"];
-        while (sc.length() < 4) {
-            sc += "A";
+            float ffreq = safeStof(settings["Frequency"], 87.9f, "Frequency");
+
+            std::string sc = settings["StationCode"];
+            while (sc.length() < 4) sc += "A";
+
+            uint8_t pt = static_cast<uint8_t>(
+                safeStoi(settings["ProgramType"], 0, "ProgramType"));
+            uint8_t pe = static_cast<uint8_t>(
+                safeStoi(settings["Preemphasis"], 1, "Preemphasis"));
+
+            qn8027.setChannel(ffreq);
+            qn8027.setPreemphasis(pe);
+            qn8027.setStationCode(sc);
+            qn8027.setProgramType(pt);
+
+            uint8_t inputImpd = static_cast<uint8_t>(
+                safeStoi(settings["InputImpedance"], 20, "InputImpedance"));
+            qn8027.setAudioInpImp(inputImpd);
+
+            uint8_t ibg = static_cast<uint8_t>(
+                safeStoi(settings["TXInputBufferGain"], 3, "TXInputBufferGain"));
+            qn8027.setTxInputBufferGain(ibg);
+
+            uint8_t dg = static_cast<uint8_t>(
+                safeStoi(settings["TXDigitalGain"], 0, "TXDigitalGain"));
+            qn8027.setTxDigitalGain(dg);
+
+            float tp = safeStof(settings["TransmitPower"], 100.0f, "TransmitPower");
+            tp /= 55.0f;
+            tp += 20.0f;
+            if (tp < 20.0f) tp = 20.0f;
+            if (tp > 75.0f) tp = 75.0f;
+            qn8027.setTxPower(static_cast<uint8_t>(std::round(tp)));
+
+            qn8027.RDS(1);
+            qn8027.startTransmit();
+            qn8027.printInfo();
+        } catch (const std::exception &e) {
+            LogErr(VB_PLUGIN, "KFMT: initializeQN8027() exception: %s\n", e.what());
+        } catch (...) {
+            LogErr(VB_PLUGIN, "KFMT: initializeQN8027() unknown exception\n");
         }
-        uint8_t pt = std::stoi(settings["ProgramType"]);
-        uint8_t pe = std::stoi(settings["Preemphasis"]);
-
-        qn8027.setChannel(ffreq);
-        qn8027.setPreemphasis(pe);
-        qn8027.setStationCode(sc);
-        qn8027.setProgramType(pt);
-
-        uint8_t inputImpd = std::stoi(settings["InputImpedance"]);
-        qn8027.setAudioInpImp(inputImpd);
-
-        uint8_t ibg = std::stoi(settings["TXInputBufferGain"]);
-        qn8027.setTxInputBufferGain(ibg);
-
-        uint8_t dg = std::stoi(settings["TXDigitalGain"]);
-        qn8027.setTxDigitalGain(dg);
-
-        // need range of 20 to 75
-        float tp = std::stof(settings["TransmitPower"]);
-        tp /= 55.0f;
-        tp += 20;
-        qn8027.setTxPower(std::round(tp));
-
-
-        qn8027.RDS(1); // Enable RDS
-
-        qn8027.startTransmit();            
-        qn8027.printInfo();
-/*
-
-        setIfNotFound("TXFreqDeviation", "129");
-        setIfNotFound("RDSFreqDeviation", "10");
-        setIfNotFound("TXPilotFreqDeviation", "9");
-        void setTxFreqDeviation(uint8_t Fdev);
-        void setRDSFreqDeviation(uint8_t RDSFreqDev);
-        void setTxPilotFreqDeviation(uint8_t PGain);
-*/
-
     }
 
     void run() {
         std::unique_lock<std::mutex> lk(lock);
+
         while (running) {
             uint64_t ct = GetTimeMS();
-            if (ct > nextStationTime && curStationIdString < stationIdStrings.size()) {
+
+            if (ct > nextStationTime && curStationIdString < (int)stationIdStrings.size()) {
                 std::string s = stationIdStrings[curStationIdString];
                 if (detected) {
                     functions.emplace([this, s]() {
-                        qn8027.sendStationName(s);
+                        try {
+                            qn8027.sendStationName(s);
+                        } catch (const std::exception &e) {
+                            LogErr(VB_PLUGIN, "KFMT: exception in sendStationName: %s\n", e.what());
+                        } catch (...) {
+                            LogErr(VB_PLUGIN, "KFMT: unknown exception in sendStationName\n");
+                        }
                     });
                 }
 
                 curStationIdString++;
-                if (curStationIdString >= stationIdStrings.size()) {
+                if (curStationIdString >= (int)stationIdStrings.size()) {
                     curStationIdString = 0;
                 }
                 nextStationTime = ct + stationIdCycleTime * 1000;
             }
+
             if (ct > nextRDSTime) {
                 if (detected) {
                     functions.emplace([this]() {
-                        if (title.empty() && artist.empty() && album.empty()) {
-                            qn8027.sendStationRadioTextPlus(settings["StationName"], settings["StationURL"]);
-                        } else {
-                            qn8027.sendItemRadioTextPlus(artist, title, album);
+                        try {
+                            if (title.empty() && artist.empty() && album.empty()) {
+                                qn8027.sendStationRadioTextPlus(settings["StationName"],
+                                                                settings["StationURL"]);
+                            } else {
+                                qn8027.sendItemRadioTextPlus(artist, title, album);
+                            }
+                        } catch (const std::exception &e) {
+                            LogErr(VB_PLUGIN, "KFMT: exception in RDS lambda: %s\n", e.what());
+                        } catch (...) {
+                            LogErr(VB_PLUGIN, "KFMT: unknown exception in RDS lambda\n");
                         }
                     });
                 }
-                nextRDSTime = ct + 4000; // every 4 seconds
+                nextRDSTime = ct + 4000;
             }
+
             while (!functions.empty()) {
-                std::string resp;
                 auto f = functions.front();
                 functions.pop();
                 lk.unlock();
-                f();
+                try {
+                    f();
+                } catch (const std::exception &e) {
+                    LogErr(VB_PLUGIN, "KFMT: exception in queued function: %s\n", e.what());
+                } catch (...) {
+                    LogErr(VB_PLUGIN, "KFMT: unknown exception in queued function\n");
+                }
                 lk.lock();
             }
+
             if (running && functions.empty()) {
                 condition.wait_for(lk, std::chrono::seconds(1));
             }
         }
     }
+
     void startAction() {
-        if (detected) {
-            if (settings["IdleAction"] == "1") {
-                std::unique_lock<std::mutex> lk(lock);
-                functions.emplace([this]() {
+        if (!detected) return;
+
+        std::lock_guard<std::mutex> lk(lock);
+        if (settings["IdleAction"] == "1") {
+            functions.emplace([this]() {
+                try {
                     qn8027.unmute();
-                });
-            } else if (settings["IdleAction"] == "2") {
-                std::unique_lock<std::mutex> lk(lock);
-                functions.emplace([this]() {
+                } catch (...) {
+                    LogErr(VB_PLUGIN, "KFMT: exception in unmute()\n");
+                }
+            });
+        } else if (settings["IdleAction"] == "2") {
+            functions.emplace([this]() {
+                try {
                     qn8027.startTransmit();
-                });
-            }
-            condition.notify_all();
+                } catch (...) {
+                    LogErr(VB_PLUGIN, "KFMT: exception in startTransmit()\n");
+                }
+            });
         }
+        condition.notify_all();
     }
-   
+
     void stopAction() {
-        if (detected) {
-            if (settings["IdleAction"] == "1") {
-                std::unique_lock<std::mutex> lk(lock);
-                functions.emplace([this]() {
+        if (!detected) return;
+
+        std::lock_guard<std::mutex> lk(lock);
+        if (settings["IdleAction"] == "1") {
+            functions.emplace([this]() {
+                try {
                     qn8027.mute();
-                });
-            } else if (settings["IdleAction"] == "2") {
-                std::unique_lock<std::mutex> lk(lock);
-                functions.emplace([this]() {
+                } catch (...) {
+                    LogErr(VB_PLUGIN, "KFMT: exception in mute()\n");
+                }
+            });
+        } else if (settings["IdleAction"] == "2") {
+            functions.emplace([this]() {
+                try {
                     qn8027.stopTransmit();
-                });
-            }
-            condition.notify_all();
+                } catch (...) {
+                    LogErr(VB_PLUGIN, "KFMT: exception in stopTransmit()\n");
+                }
+            });
         }
-    }
-    
-    static void padTo(std::string &s, int l) {
-        size_t n = l - s.size();
-        if (n) {
-            s.append(n, ' ');
-        }
+        condition.notify_all();
     }
 
     void formatAndSendText(const std::string &text, int location) {
         std::string output;
-        
-        int artistIdx = -1;
-        int titleIdx = -1;
-        int albumIdx = -1;
 
-        for (int x = 0; x < text.length(); x++) {
+        for (int x = 0; x < (int)text.length(); x++) {
             if (text[x] == '[') {
-                if (artist == "" && title == "") {
-                    while (text[x] != ']' && x < text.length()) {
-                        x++;
-                    }
+                if (artist.empty() && title.empty()) {
+                    while (x < (int)text.length() && text[x] != ']') x++;
                 }
             } else if (text[x] == ']') {
-                //nothing
+                // ignore
             } else if (text[x] == '{') {
-                const static std::string ARTIST = "{Artist}";
-                const static std::string TITLE = "{Title}";
-                const static std::string ALBUM = "{Album}";
+                static const std::string ARTIST = "{Artist}";
+                static const std::string TITLE  = "{Title}";
+                static const std::string ALBUM  = "{Album}";
                 std::string subs = text.substr(x);
-                if (subs.rfind(ARTIST) == 0) {
-                    artistIdx = output.length();
+                if (subs.rfind(ARTIST, 0) == 0) {
                     x += ARTIST.length() - 1;
                     output += artist;
-                } else if (subs.rfind(TITLE) == 0) {
-                    titleIdx = output.length();
+                } else if (subs.rfind(TITLE, 0) == 0) {
                     x += TITLE.length() - 1;
                     output += title;
-                } else if (subs.rfind(ALBUM) == 0) {
-                    titleIdx = output.length();
+                } else if (subs.rfind(ALBUM, 0) == 0) {
                     x += ALBUM.length() - 1;
                     output += album;
                 } else {
@@ -289,10 +377,11 @@ public:
                 output += text[x];
             }
         }
+
         if (location == 0) {
             LogDebug(VB_PLUGIN, "Setting RDS Station text to \"%s\"\n", output.c_str());
             std::vector<std::string> fragments;
-            while (output.size()) {
+            while (!output.empty()) {
                 if (output.size() <= 8) {
                     padTo(output, 8);
                     fragments.push_back(output);
@@ -305,85 +394,101 @@ public:
                 }
             }
             if (fragments.empty()) {
-                std::string m = "        ";
-                fragments.push_back(m);
+                fragments.emplace_back("        ");
             }
+
             if (detected) {
-                std::unique_lock<std::mutex> lk(lock);
-                stationIdStrings = fragments;
+                std::lock_guard<std::mutex> lk(lock);
+                stationIdStrings   = fragments;
                 curStationIdString = 0;
-                lk.unlock();
+                nextStationTime    = 0;
                 condition.notify_all();
             }
         } else {
             LogDebug(VB_PLUGIN, "Setting RDS %d text to \"%s\"\n", location, output.c_str());
-            if (detected) {
-                std::unique_lock<std::mutex> lk(lock);
-                //rdsStrings[location - 1] = output;
-                lk.unlock();
-                condition.notify_all();
-            }
         }
     }
-    
-    virtual void playlistCallback(const Json::Value &playlist, const std::string &action, const std::string &section, int item) {
+
+    virtual void playlistCallback(const Json::Value &playlist,
+                                  const std::string &action,
+                                  const std::string &section,
+                                  int item) override {
         if (action == "start") {
             startAction();
         } else if (action == "stop") {
-            std::unique_lock<std::mutex> lk(lock);
-            functions.emplace([this]() {
-                qn8027.disableRadioTextPlus();
-            });
-            lk.unlock();
+            {
+                std::lock_guard<std::mutex> lk(lock);
+                if (detected) {
+                    functions.emplace([this]() {
+                        try {
+                            qn8027.disableRadioTextPlus();
+                        } catch (...) {
+                            LogErr(VB_PLUGIN, "KFMT: exception in disableRadioTextPlus()\n");
+                        }
+                    });
+                }
+            }
+
             artist.clear();
             title.clear();
             album.clear();
-            track = 0;
+            track       = 0;
             mediaLength = 0;
             formatAndSendText(settings["StationID"], 0);
-            nextRDSTime = 0;
+            nextRDSTime     = 0;
             nextStationTime = 0;
-            
+
             stopAction();
         }
-        
     }
-    virtual void mediaCallback(const Json::Value &playlist, const MediaDetails &mediaDetails) {
-        title = mediaDetails.title;
-        artist = mediaDetails.artist;
-        album = mediaDetails.album;
-        track = mediaDetails.track;
+
+    virtual void mediaCallback(const Json::Value &playlist,
+                               const MediaDetails &mediaDetails) override {
+        title       = mediaDetails.title;
+        artist      = mediaDetails.artist;
+        album       = mediaDetails.album;
+        track       = mediaDetails.track;
         mediaLength = mediaDetails.length;
-        
+
         std::string type = playlist["currentEntry"]["type"].asString();
         if (type != "both" && type != "media") {
-            title = "";
-            artist = "";
-            album = "";
-            track = 0;
+            title.clear();
+            artist.clear();
+            album.clear();
+            track       = 0;
             mediaLength = 0;
         }
-        std::unique_lock<std::mutex> lk(lock);
-        functions.emplace([this]() {
-            if (title.empty() && artist.empty() && album.empty()) {
-                qn8027.sendStationRadioTextPlus(settings["StationName"], settings["StationURL"]);
-            } else {
-                qn8027.sendItemRadioTextPlus(artist, title, album);
+
+        {
+            std::lock_guard<std::mutex> lk(lock);
+            if (detected) {
+                functions.emplace([this]() {
+                    try {
+                        if (title.empty() && artist.empty() && album.empty()) {
+                            qn8027.sendStationRadioTextPlus(settings["StationName"],
+                                                            settings["StationURL"]);
+                        } else {
+                            qn8027.sendItemRadioTextPlus(artist, title, album);
+                        }
+                    } catch (...) {
+                        LogErr(VB_PLUGIN, "KFMT: exception in mediaCallback RDS\n");
+                    }
+                });
             }
-        });
-        lk.unlock();
+        }
+
         formatAndSendText(settings["StationID"], 0);
-        nextRDSTime = 0;
+        nextRDSTime     = 0;
         nextStationTime = 0;
+        condition.notify_all();
     }
-    
-    
+
     void setDefaultSettings() {
         setIfNotFound("Frequency", "87.9");
         setIfNotFound("IdleAction", "0");
         setIfNotFound("Preemphasis", "1");
 
-        setIfNotFound("StationID", "Merry   Christ- mas", true);        
+        setIfNotFound("StationID", "Merry   Christ- mas", true);
         setIfNotFound("StationName", "", true);
         setIfNotFound("StationURL", "", true);
         setIfNotFound("StationIDTime", "5");
@@ -399,13 +504,17 @@ public:
         setIfNotFound("RDSFreqDeviation", "10");
         setIfNotFound("TXPilotFreqDeviation", "9");
     }
-    void setIfNotFound(const std::string &s, const std::string &v, bool emptyAllowed = false) {
+
+    void setIfNotFound(const std::string &s,
+                       const std::string &v,
+                       bool emptyAllowed = false) {
         if (settings.find(s) == settings.end()) {
             settings[s] = v;
-        } else if (!emptyAllowed && settings[s] == "") {
+        } else if (!emptyAllowed && settings[s].empty()) {
             settings[s] = v;
         }
-        LogDebug(VB_PLUGIN, "Setting \"%s\": \"%s\"\n", s.c_str(), settings[s].c_str());
+        LogDebug(VB_PLUGIN, "Setting \"%s\": \"%s\"\n",
+                 s.c_str(), settings[s].c_str());
     }
 };
 

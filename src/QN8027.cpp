@@ -5,7 +5,6 @@
 
 #include <chrono>
 #include <thread>
-#include <cstring>
 
 // ---------------------------------------------------------------------------
 // Register Constants
@@ -61,8 +60,6 @@ QN8027::QN8027() {
             if (detect()) {
                 LogInfo(VB_PLUGIN, "QN8027 detected on native I2C bus %d\n", bus);
                 channel = 87.9f;
-                piCode = 0;
-                ptyCode = 0;
                 return;
             }
             delete i2c;
@@ -75,8 +72,6 @@ QN8027::QN8027() {
     if (cp2112->init() && detect()) {
         LogInfo(VB_PLUGIN, "QN8027 detected via CP2112 HID bridge\n");
         channel = 87.9f;
-        piCode = 0;
-        ptyCode = 0;
         return;
     }
 
@@ -86,8 +81,6 @@ QN8027::QN8027() {
         cp2112 = nullptr;
     }
     channel = 87.9f;
-    piCode = 0;
-    ptyCode = 0;
 }
 
 QN8027::~QN8027() {
@@ -254,6 +247,7 @@ void QN8027::setMonoAudio(bool mono) {
     systemReg.fields.monoAudio = mono ? 1 : 0;
     updateSYSTEM_REG();
     waitForIdle(50);
+    rdsBuilder_.setStereo(!mono);
 }
 
 void QN8027::startTransmit() {
@@ -417,25 +411,15 @@ void QN8027::setStationCode(const std::string &sc) {
         LogInfo(VB_PLUGIN, "Station Code too short, must be 4 characters\n");
         return;
     }
-    if (sc[0] != 'K' && sc[0] != 'W') {
-        piCode = std::strtol(sc.c_str(), nullptr, 16) & 0xFFFF;
-    } else {
-        uint16_t v2 = sc[1] - 65;
-        uint16_t v3 = sc[2] - 65;
-        uint16_t v4 = sc[3] - 65;
-        if (v2 > 26) v2 = 0;
-        if (v3 > 26) v3 = 0;
-        if (v4 > 26) v4 = 0;
-        uint16_t v1 = (sc[0] == 'W') ? 21672 : 4096;
-        v1 += v4;
-        v1 += v3 * 26;
-        v1 += v2 * 26 * 26;
-        piCode = v1 & 0xFFFF;
-    }
+    rdsBuilder_.setStationCode(sc);
 }
 
 void QN8027::setProgramType(uint8_t pty) {
-    ptyCode = pty & 0x1F;
+    rdsBuilder_.setProgramType(pty);
+}
+
+void QN8027::startNewItem() {
+    rdsBuilder_.toggleRTPlus();
 }
 
 // ---------------------------------------------------------------------------
@@ -462,18 +446,9 @@ void QN8027::waitForRDSSend() {
 // ---------------------------------------------------------------------------
 
 void QN8027::sendStationName(const std::string &sn) {
-    char char_array[9] = {0}; // PS Name is max 8 characters + null terminator.
-    strncpy(char_array, sn.c_str(), sizeof(char_array));
-    int str_len = strlen(char_array);
-    int rds_len = str_len + (str_len % 2);    // Make it a multiple of 2.
-
     LogDebug(VB_PLUGIN, "Sending RDS Station ID: \"%s\"\n", sn.c_str());
-    for (int i = 0; i < rds_len; i += 2) {
-        uint8_t ptyHi = (ptyCode & 0x18) >> 3; // top 2 bits of PTY
-        uint8_t ptyLo = (ptyCode << 5) & 0xE0; // bottom 3 bits of PTY
-        sendRDS((piCode >> 8) * 0xFF, piCode & 0xFF,
-                ptyHi, ptyLo | (0x08 + (i / 2)),
-                0xE0, 0xCD, char_array[i], char_array[i + 1]);
+    for (auto &p : rdsBuilder_.buildPSPackets(sn)) {
+        sendRDS(p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7]);
         waitForRDSSend();
     }
 }
@@ -484,19 +459,8 @@ void QN8027::sendStationName(const std::string &sn) {
 
 void QN8027::sendRadioText(const std::string &rt) {
     LogDebug(VB_PLUGIN, "Sending RDS Radio Text: \"%s\"\n", rt.c_str());
-    char char_array[65];
-    memset(char_array, 0, sizeof(char_array));
-    strncpy(char_array, rt.c_str(), sizeof(char_array));
-    int str_len = strlen(char_array) + 1;
-    int rds_len = str_len + (str_len % 2);    // Make it a multiple of 2.
-
-    for (int i = 0; i < rds_len; i += 4) {
-        uint8_t ptyHi = (ptyCode & 0x18) >> 3;
-        uint8_t ptyLo = (ptyCode << 5) & 0xE0;
-        sendRDS((piCode >> 8) * 0xFF, piCode & 0xFF,
-                0x20 | ptyHi, ptyLo | (i / 4),
-                char_array[i], char_array[i + 1],
-                char_array[i + 2], char_array[i + 3]);
+    for (auto &p : rdsBuilder_.buildRTPackets(rt)) {
+        sendRDS(p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7]);
         waitForRDSSend();
     }
 }
@@ -505,127 +469,16 @@ void QN8027::sendRadioText(const std::string &rt) {
 // RT+ segments
 // ---------------------------------------------------------------------------
 
-void QN8027::sendRTPlusSegments(
-    std::string &rt,
-    std::vector<std::tuple<uint8_t, uint8_t, uint8_t>> &rtPlusSegments,
-    bool enable) {
-
-    uint8_t ptyHi = (ptyCode & 0x18) >> 3;
-    uint8_t ptyLo = (ptyCode << 5) & 0xE0;
-
-    while (!rt.empty()) {
-        int maxSeg = (int)rtPlusSegments.size() - 1;
-        int maxIdx = (int)rt.length();
-        for (int x = 1; x < (int)rtPlusSegments.size(); x++) {
-            auto segment = rtPlusSegments[x];
-            if (std::get<0>(segment) + std::get<1>(segment) > 63) {
-                maxSeg = x - 1;
-                maxIdx = std::get<0>(rtPlusSegments[maxSeg]) + std::get<1>(rtPlusSegments[maxSeg]);
-                break;
-            }
-        }
-        std::string rt2 = rt.substr(0, maxIdx);
-        sendRadioText(rt2);
-
-        int numSend = 2;
-        for (int x = 0; x <= maxSeg; x += numSend) {
-            auto segment = rtPlusSegments[x];
-            uint8_t idx = std::get<0>(segment);
-            uint8_t len = std::get<1>(segment);
-            uint8_t type = std::get<2>(segment);
-
-            std::tuple<uint8_t, uint8_t, uint8_t> nextSegment = {0, 0, 0};
-            numSend = 2;
-            if (len < 32 && x + 1 <= maxSeg) {
-                nextSegment = rtPlusSegments[x + 1];
-                if (std::get<1>(nextSegment) >= 32) {
-                    std::swap(segment, nextSegment);
-                }
-            } else if (x + 1 > maxSeg) {
-                nextSegment = rtPlusSegments[x + 1];
-            } else {
-                numSend = 1;
-            }
-
-            uint8_t idx1 = std::get<0>(segment) & 0x3F;
-            uint8_t len1 = std::get<1>(segment) & 0x3F;
-            uint8_t type1 = std::get<2>(segment) & 0x3F;
-
-            uint8_t idx2 = std::get<0>(nextSegment) & 0x3F;
-            uint8_t len2 = std::get<1>(nextSegment) & 0x3F;
-            uint8_t type2 = std::get<2>(nextSegment) & 0x1F;
-
-            uint8_t rb = rtPlusToggle ? 0x10 : 0x00; // RT+ toggle bit
-
-            sendRDS((piCode >> 8) * 0xFF, piCode & 0xFF,
-                    0x16 | ptyHi,
-                    (uint8_t)(ptyLo | rb | ((type1 >> 3) & 0x07)),
-                    (uint8_t)(((type1 & 0x07) << 5) | (idx1 >> 1)),
-                    (uint8_t)(((idx1 & 0x01) << 7) |
-                              (len1 << 1) |
-                              ((type2 & 0x20) ? 0x01 : 0x00)),
-                    (uint8_t)(((type2 & 0x1F) << 3) | (idx2 >> 3)),
-                    (uint8_t)(((idx2 << 5) & 0xE0) | len2));
-            waitForRDSSend();
-        }
-
-        rt.erase(0, rt2.length());
-        for (int i = 0; i <= maxSeg; i++) {
-            rtPlusSegments.erase(rtPlusSegments.begin());
-        }
-        for (int i = 0; i < (int)rtPlusSegments.size(); i++) {
-            auto &segment = rtPlusSegments[i];
-            std::get<0>(segment) -= (uint8_t)rt2.length();
-        }
-    }
-
-    if (enable) {
-        uint8_t rb = rtPlusToggle ? 0x18 : 0x08; // toggle + running bit
-        sendRDS((piCode >> 8) * 0xFF, piCode & 0xFF,
-                0x16 | ptyHi, ptyLo | rb,
-                0x00, 0x00,
-                0x00, 0x00);
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Station RT+
 // ---------------------------------------------------------------------------
 
 void QN8027::sendStationRadioTextPlus(const std::string &stationName,
                                       const std::string &homepage) {
-    uint8_t ptyHi = (ptyCode & 0x18) >> 3;
-    uint8_t ptyLo = (ptyCode << 5) & 0xE0;
-    sendRDS((piCode >> 8) * 0xFF, piCode & 0xFF,
-            0x30 | ptyHi, ptyLo | 0x16,
-            0x00, 0x00,
-            0x4B, 0xD7);
-    waitForRDSSend();
-
-    std::string rt;
-    int stationNameLen = 1;
-    int homepageLen = 1;
-
-    int stationNameIdx = (int)rt.length();
-    if (!stationName.empty()) {
-        stationNameLen = (int)stationName.length();
-        rt += stationName;
-    } else {
-        rt += " ";
+    for (auto &p : rdsBuilder_.buildStationRTPlusSequence(stationName, homepage)) {
+        sendRDS(p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7]);
+        waitForRDSSend();
     }
-    int homepageIdx = (int)rt.length();
-    if (!homepage.empty()) {
-        rt += " - ";
-        homepageLen = (int)homepage.length();
-        rt += homepage;
-    } else {
-        rt += " ";
-    }
-
-    std::vector<std::tuple<uint8_t, uint8_t, uint8_t>> rtPlusSegments;
-    rtPlusSegments.emplace_back((uint8_t)stationNameIdx, (uint8_t)stationNameLen, RT_PLUS_STATIONNAME);
-    rtPlusSegments.emplace_back((uint8_t)homepageIdx, (uint8_t)homepageLen, RT_PLUS_HOMEPAGE);
-    sendRTPlusSegments(rt, rtPlusSegments, false);
 }
 
 // ---------------------------------------------------------------------------
@@ -635,69 +488,10 @@ void QN8027::sendStationRadioTextPlus(const std::string &stationName,
 void QN8027::sendItemRadioTextPlus(const std::string &artist,
                                    const std::string &title,
                                    const std::string &album) {
-    rtPlusToggle = !rtPlusToggle;
-
-    uint8_t ptyHi = (ptyCode & 0x18) >> 3;
-    uint8_t ptyLo = (ptyCode << 5) & 0xE0;
-    sendRDS((piCode >> 8) * 0xFF, piCode & 0xFF,
-            0x30 | ptyHi, ptyLo | 0x16,
-            0x00, 0x00,
-            0x4B, 0xD7);
-    waitForRDSSend();
-
-    std::string rt;
-    int titleLen = 1;
-    int albumLen = 1;
-    int artistLen = 1;
-
-    int titleIdx = (int)rt.length();
-    if (!title.empty()) {
-        titleLen = (int)title.length();
-        rt += title;
-    } else {
-        rt += " ";
+    for (auto &p : rdsBuilder_.buildItemRTPlusSequence(artist, title, album)) {
+        sendRDS(p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7]);
+        waitForRDSSend();
     }
-
-    int artistIdx = (int)rt.length();
-    if (!artist.empty()) {
-        rt += " - ";
-        artistIdx = (int)rt.length();
-        artistLen = (int)artist.length();
-        rt += artist;
-    } else {
-        rt += " ";
-    }
-
-    int albumIdx = (int)rt.length();
-    if (albumIdx > 63) {
-        artistLen = 63 - artistIdx + 1;
-        rt.resize(63);
-        albumLen = 1;
-        albumIdx = (int)rt.length();
-        rt += " ";
-    } else {
-        if (!album.empty()) {
-            if (rt.length() + album.length() + 3 > 64) {
-                albumLen = 1;
-                rt += " ";
-            } else {
-                rt += " - ";
-                albumIdx = (int)rt.length();
-                albumLen = (int)album.length();
-                rt += album;
-            }
-        } else {
-            rt += " ";
-        }
-    }
-
-    rtPlusToggle = !rtPlusToggle;
-    std::vector<std::tuple<uint8_t, uint8_t, uint8_t>> rtPlusSegments;
-    rtPlusSegments.emplace_back((uint8_t)titleIdx, (uint8_t)titleLen, RT_PLUS_TITLE);
-    rtPlusSegments.emplace_back((uint8_t)artistIdx, (uint8_t)artistLen, RT_PLUS_ARTIST);
-    rtPlusSegments.emplace_back((uint8_t)albumIdx, (uint8_t)albumLen, RT_PLUS_ALBUM);
-    sendRTPlusSegments(rt, rtPlusSegments,
-                       !title.empty() || !album.empty() || !artist.empty());
 }
 
 // ---------------------------------------------------------------------------
@@ -706,17 +500,8 @@ void QN8027::sendItemRadioTextPlus(const std::string &artist,
 
 void QN8027::disableRadioTextPlus() {
     LogDebug(VB_PLUGIN, "Disabling RDS RT+\n");
-
-    uint8_t ptyHi = (ptyCode & 0x18) >> 3;
-    uint8_t ptyLo = (ptyCode << 5) & 0xE0;
-    sendRDS((piCode >> 8) * 0xFF, piCode & 0xFF,
-            0x30 | ptyHi, ptyLo | 0x16,
-            0x00, 0x00,
-            0x4B, 0xD7);
-    waitForRDSSend();
-
-    sendRDS((piCode >> 8) * 0xFF, piCode & 0xFF,
-            0x16 | ptyHi, ptyLo,  // item running bit off
-            0x00, 0x00,
-            0x00, 0x00);
+    for (auto &p : rdsBuilder_.buildRTPlusDisableSequence()) {
+        sendRDS(p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7]);
+        waitForRDSSend();
+    }
 }

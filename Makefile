@@ -7,7 +7,7 @@ include $(SRCDIR)/makefiles/platform/*.mk
 all: $(MKFILE_DIR)libfpp-kfmt.$(SHLIB_EXT)	
 debug: all
 
-OBJECTS_fpp_kfmt_so += $(MKFILE_DIR)src/FPPKFMTPlugin.o  $(MKFILE_DIR)src/QN8027.o $(MKFILE_DIR)src/CP2112.o
+OBJECTS_fpp_kfmt_so += $(MKFILE_DIR)src/FPPKFMTPlugin.o  $(MKFILE_DIR)src/QN8027.o $(MKFILE_DIR)src/CP2112.o $(MKFILE_DIR)src/RDSPacketBuilder.o
 LIBS_fpp_kfmt_so += -L$(SRCDIR) -lfpp -ljsoncpp -lhidapi-hidraw
 CFLAGS += -I$(SRCDIR) -I$(MKFILE_DIR)src
 

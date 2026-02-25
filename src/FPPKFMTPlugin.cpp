@@ -64,9 +64,10 @@ public:
     uint32_t stationIdCycleTime = 5;
 
     std::vector<std::string> stationIdStrings;
-    int       curStationIdString = 0;
-    uint64_t  nextStationTime    = 0;
-    uint64_t  nextRDSTime        = 0;
+    int       curStationIdString = -1; // -1 = not yet started; advanced to 0 on first loop
+    uint64_t  nextStationTime    = 0;  // when to advance to the next PS fragment
+    uint64_t  nextPSTime         = 0;  // when to send the next PS packet (~400 ms)
+    uint64_t  nextRDSTime        = 0;  // when to send the next RT/RT+ sequence
 
     std::string title;
     std::string artist;
@@ -77,7 +78,7 @@ public:
     FPPKFMTPlugin()
         : FPPPlugins::Plugin("fpp-kfmt", true)
         , FPPPlugins::PlaylistEventPlugin() {
-        LogInfo(VB_PLUGIN, "KFMT: constructor start\n");
+        LogDebug(VB_PLUGIN, "KFMT: constructor start\n");
 
         // Absolutely no exceptions escape this constructor.
         try {
@@ -128,7 +129,7 @@ public:
     }
 
     virtual ~FPPKFMTPlugin() {
-        LogInfo(VB_PLUGIN, "KFMT: destructor start\n");
+        LogDebug(VB_PLUGIN, "KFMT: destructor start\n");
 
         // Never enqueue new work after we decide to shut down.
         running = false;
@@ -153,7 +154,7 @@ public:
             sendThread.join();
         }
 
-        LogInfo(VB_PLUGIN, "KFMT: destructor complete\n");
+        LogDebug(VB_PLUGIN, "KFMT: destructor complete\n");
     }
 
     virtual void settingChanged(const std::string &key,
@@ -237,7 +238,19 @@ public:
         while (running) {
             uint64_t ct = GetTimeMS();
 
-            if (ct > nextStationTime && curStationIdString < (int)stationIdStrings.size()) {
+            // Advance to the next PS fragment every stationIdCycleTime seconds.
+            // curStationIdString starts at -1 so the first advance sets it to 0.
+            if (ct > nextStationTime && !stationIdStrings.empty()) {
+                curStationIdString++;
+                if (curStationIdString >= (int)stationIdStrings.size()) {
+                    curStationIdString = 0;
+                }
+                nextStationTime = ct + stationIdCycleTime * 1000;
+            }
+
+            // Send the current PS fragment every ~400 ms so receivers can lock on quickly.
+            if (ct > nextPSTime && curStationIdString >= 0 &&
+                    curStationIdString < (int)stationIdStrings.size()) {
                 std::string s = stationIdStrings[curStationIdString];
                 if (detected) {
                     functions.emplace([this, s]() {
@@ -250,14 +263,10 @@ public:
                         }
                     });
                 }
-
-                curStationIdString++;
-                if (curStationIdString >= (int)stationIdStrings.size()) {
-                    curStationIdString = 0;
-                }
-                nextStationTime = ct + stationIdCycleTime * 1000;
+                nextPSTime = ct + 400;
             }
 
+            // Send RT/RT+ every 2 seconds (includes Group 2A RT so all receivers benefit).
             if (ct > nextRDSTime) {
                 if (detected) {
                     functions.emplace([this]() {
@@ -275,7 +284,7 @@ public:
                         }
                     });
                 }
-                nextRDSTime = ct + 4000;
+                nextRDSTime = ct + 2000;
             }
 
             while (!functions.empty()) {
@@ -293,7 +302,7 @@ public:
             }
 
             if (running && functions.empty()) {
-                condition.wait_for(lk, std::chrono::seconds(1));
+                condition.wait_for(lk, std::chrono::milliseconds(200));
             }
         }
     }
@@ -400,8 +409,9 @@ public:
             if (detected) {
                 std::lock_guard<std::mutex> lk(lock);
                 stationIdStrings   = fragments;
-                curStationIdString = 0;
+                curStationIdString = -1; // run() will advance to 0 immediately
                 nextStationTime    = 0;
+                nextPSTime         = 0;
                 condition.notify_all();
             }
         } else {
@@ -468,6 +478,7 @@ public:
                             qn8027.sendStationRadioTextPlus(settings["StationName"],
                                                             settings["StationURL"]);
                         } else {
+                            qn8027.startNewItem();
                             qn8027.sendItemRadioTextPlus(artist, title, album);
                         }
                     } catch (...) {

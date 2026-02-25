@@ -3,15 +3,7 @@
 #include <tuple>
 #include "util/I2CUtils.h"
 #include "CP2112.h"
-
-
-// RT+ info:
-// from https://github.com/windytan/redsea/blob/cad0b697d538bd64ac358161dfb4b435bace5514/src/tables.cc#L235
-constexpr uint8_t RT_PLUS_TITLE = 1;
-constexpr uint8_t RT_PLUS_ALBUM = 2;
-constexpr uint8_t RT_PLUS_ARTIST = 4;
-constexpr uint8_t RT_PLUS_STATIONNAME = 32;
-constexpr uint8_t RT_PLUS_HOMEPAGE = 39;
+#include "RDSPacketBuilder.h"
 
 class QN8027 {
 public:
@@ -37,6 +29,9 @@ public:
 
     void setStationCode(const std::string &sc);
     void setProgramType(uint8_t pty);
+
+    // Advance the RT+ toggle bit – call once when the playing item changes.
+    void startNewItem();
 
     void calibrate();
     void setPreemphasis(bool us);
@@ -75,12 +70,9 @@ private:
     void updateSYSTEM_REG();
     void waitForRDSSend();
     void sendRDS(uint8_t by0, uint8_t by1, uint8_t by2, uint8_t by3, uint8_t by4, uint8_t by5, uint8_t by6, uint8_t by7);
-    void sendRTPlusSegments(std::string &rt, std::vector<std::tuple<uint8_t, uint8_t, uint8_t>> &rtPlusSegments, bool enable);
 
     float channel;
-    uint16_t piCode;
-    uint8_t ptyCode;
-    bool rtPlusToggle = false;
+    RDSPacketBuilder rdsBuilder_;
     
     union SystemReg {
         uint8_t byte; // Access the full 8-bit value

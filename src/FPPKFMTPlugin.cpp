@@ -223,6 +223,7 @@ public:
             qn8027.setTxPower(static_cast<uint8_t>(std::round(tp)));
 
             qn8027.RDS(1);
+            qn8027.setMonoAudio(false);
             qn8027.startTransmit();
             qn8027.printInfo();
         } catch (const std::exception &e) {
@@ -302,7 +303,7 @@ public:
             }
 
             if (running && functions.empty()) {
-                condition.wait_for(lk, std::chrono::milliseconds(200));
+                condition.wait_for(lk, std::chrono::milliseconds(50));
             }
         }
     }
@@ -426,19 +427,6 @@ public:
         if (action == "start") {
             startAction();
         } else if (action == "stop") {
-            {
-                std::lock_guard<std::mutex> lk(lock);
-                if (detected) {
-                    functions.emplace([this]() {
-                        try {
-                            qn8027.disableRadioTextPlus();
-                        } catch (...) {
-                            LogErr(VB_PLUGIN, "KFMT: exception in disableRadioTextPlus()\n");
-                        }
-                    });
-                }
-            }
-
             artist.clear();
             title.clear();
             album.clear();

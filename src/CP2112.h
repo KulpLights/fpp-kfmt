@@ -10,7 +10,7 @@ typedef struct hid_device_ hid_device;
 
 class CP2112 {
 public:
-    CP2112(const char* serial = nullptr);
+    CP2112();
     ~CP2112();
 
     // Initialize the device (returns true if successful)

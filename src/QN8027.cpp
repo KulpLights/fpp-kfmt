@@ -53,8 +53,20 @@ static const char* mapFSM(uint8_t fsm) {
 // ---------------------------------------------------------------------------
 
 QN8027::QN8027() {
-    // Try native Linux I2C first
-    for (int bus = 1; bus < 10; bus++) {
+
+    // Primary: CP2112 HID-to-I2C bridge
+    cp2112 = new CP2112();
+    if (cp2112->init() && detect()) {
+        LogInfo(VB_PLUGIN, "QN8027 detected via CP2112 HID bridge\n");
+        channel = 87.9f;
+        return;
+    } else {
+        delete cp2112;
+        cp2112 = nullptr;
+    }
+
+    // Fallback: try native Linux I2C
+    for (int bus = 10; bus > 0; --bus) {
         if (FileExists("/dev/i2c-" + std::to_string(bus))) {
             i2c = new I2CUtils(bus, 0x2c);
             if (detect()) {
@@ -67,19 +79,8 @@ QN8027::QN8027() {
         }
     }
 
-    // Fallback: CP2112 HID-to-I2C bridge
-    cp2112 = new CP2112();
-    if (cp2112->init() && detect()) {
-        LogInfo(VB_PLUGIN, "QN8027 detected via CP2112 HID bridge\n");
-        channel = 87.9f;
-        return;
-    }
 
     LogErr(VB_PLUGIN, "QN8027: No I2C or CP2112 device detected\n");
-    if (cp2112) {
-        delete cp2112;
-        cp2112 = nullptr;
-    }
     channel = 87.9f;
 }
 

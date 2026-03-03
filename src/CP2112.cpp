@@ -44,7 +44,7 @@ constexpr uint8_t CMD_RESET             = 0x01;
 // Constructor / Destructor
 // ---------------------------------------------------------------------------
 
-CP2112::CP2112(const char *serial) {
+CP2112::CP2112() {
     hid_device_info *devs = hid_enumerate(SILICON_LABS_VID, KFMT_PID);
     if (!devs) {
         devs = hid_enumerate(SILICON_LABS_VID, CP2112_PID);
@@ -61,21 +61,14 @@ CP2112::CP2112(const char *serial) {
         if (cur->vendor_id == SILICON_LABS_VID &&
             (cur->product_id == KFMT_PID || cur->product_id == CP2112_PID)) {
 
-            bool serialMatch =
-                (serial == nullptr) ||
-                (cur->serial_number &&
-                 wcscmp(cur->serial_number, (const wchar_t *)serial) == 0);
-
-            if (serialMatch) {
-                h = hid_open_path(cur->path);
-                if (h) {
-                    LogInfo(VB_PLUGIN, "CP2112: Device opened successfully\n");
-                    LogInfo(VB_PLUGIN, "Manufacturer: %ls\n", cur->manufacturer_string);
-                    LogInfo(VB_PLUGIN, "Product: %ls\n", cur->product_string);
-                    LogInfo(VB_PLUGIN, "Serial: %ls\n", cur->serial_number);
-                    found = true;
-                    break;
-                }
+            h = hid_open_path(cur->path);
+            if (h) {
+                LogInfo(VB_PLUGIN, "CP2112: Device opened successfully\n");
+                LogInfo(VB_PLUGIN, "Manufacturer: %ls\n", cur->manufacturer_string);
+                LogInfo(VB_PLUGIN, "Product: %ls\n", cur->product_string);
+                LogInfo(VB_PLUGIN, "Serial: %ls\n", cur->serial_number);
+                found = true;
+                break;
             }
         }
         cur = cur->next;

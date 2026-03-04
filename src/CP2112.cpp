@@ -376,10 +376,9 @@ void CP2112::writeBlockData(uint8_t regAddr,
         return;
 
     // Build block: [regAddr, data...]
-    std::vector<uint8_t> block;
-    block.reserve(data.size() + 1);
-    block.push_back(regAddr);
-    block.insert(block.end(), data.begin(), data.end());
+    std::vector<uint8_t> block(data.size() + 1);
+    block[0] = regAddr;
+    std::copy(data.begin(), data.end(), block.begin() + 1);
 
     writeI2CBlock(block);
 

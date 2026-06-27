@@ -9,6 +9,13 @@
 	"versions": [
         {
             "minFPPVersion": "9.2",
+            "maxFPPVersion": "9.99",
+            "branch": "main",
+            "sha": "",
+            "allowUpdates": 1
+        },
+        {
+            "minFPPVersion": "10.0",
             "maxFPPVersion": "0",
             "branch": "main",
             "sha": "",

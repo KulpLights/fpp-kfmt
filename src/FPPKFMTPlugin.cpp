@@ -1,6 +1,7 @@
 #include <fpp-pch.h>
 
 #include <string>
+#include <string_view>
 #include <vector>
 #include <queue>
 #include <thread>
@@ -128,8 +129,32 @@ public:
         }
     }
 
+    // Stop transmitting and JOIN the sender before FPP destroys this plugin. A
+    // destructor is too late for that: the thread body is this plugin's code and
+    // touches every member here, so it has to be finished while the object is
+    // still whole - and finished before the library it lives in can be unmapped.
+    // The last queued item is the stopTransmit(), so the join also guarantees
+    // the carrier is off before the plugin goes. Everything here is synchronous,
+    // so no readiness predicate is needed.
+    virtual std::function<bool()> shutdown() override {
+        stopSending();
+        // This plugin raised the warning, so it takes it back rather than
+        // leaving a stale one on the UI for a plugin that is no longer loaded.
+        WarningHolder::RemoveWarning("Could not detect QN8027 device.");
+        return nullptr;
+    }
+
     virtual ~FPPKFMTPlugin() {
         LogDebug(VB_PLUGIN, "KFMT: destructor start\n");
+        stopSending(); // no-op if shutdown() already ran
+        LogDebug(VB_PLUGIN, "KFMT: destructor complete\n");
+    }
+
+    // Idempotent, so shutdown() and the destructor can both call it.
+    void stopSending() {
+        if (!sendThread.joinable()) {
+            return;
+        }
 
         // Never enqueue new work after we decide to shut down.
         running = false;
@@ -150,11 +175,7 @@ public:
         }
         condition.notify_all();
 
-        if (sendThread.joinable()) {
-            sendThread.join();
-        }
-
-        LogDebug(VB_PLUGIN, "KFMT: destructor complete\n");
+        sendThread.join();
     }
 
     virtual void settingChanged(const std::string &key,
@@ -367,9 +388,15 @@ public:
             } else if (text[x] == ']') {
                 // ignore
             } else if (text[x] == '{') {
-                static const std::string ARTIST = "{Artist}";
-                static const std::string TITLE  = "{Title}";
-                static const std::string ALBUM  = "{Album}";
+                // constexpr string_view, not static const std::string: a
+                // static local in an inline (in-class) function is emitted
+                // as an STB_GNU_UNIQUE symbol, and glibc permanently refuses
+                // to unload any library that first defines one - dlclose()
+                // then succeeds and unmaps nothing. These need no dynamic
+                // initialisation, so they produce no guard variable at all.
+                constexpr std::string_view ARTIST = "{Artist}";
+                constexpr std::string_view TITLE  = "{Title}";
+                constexpr std::string_view ALBUM  = "{Album}";
                 std::string subs = text.substr(x);
                 if (subs.rfind(ARTIST, 0) == 0) {
                     x += ARTIST.length() - 1;
@@ -516,6 +543,29 @@ public:
                  s.c_str(), settings[s].c_str());
     }
 };
+
+// Safe to dlclose() on unload: the only thread is the I2C sender, and shutdown()
+// stops and joins it. No timers, no CurlManager requests, no epoll descriptors,
+// no commands and no HTTP routes. The settings FileMonitor entry is registered
+// and removed by FPPPlugins::Plugin itself, in its destructor, which runs before
+// the library is unmapped.
+//
+// The USB HID path (CP2112) does not change that, which is worth spelling out
+// because fpp-vastfmt also talks to USB HID and deliberately does NOT opt in.
+// What matters is not whether a plugin uses USB, but whose address space the
+// HID backend's code lives in and whether it runs threads:
+//
+//   - This plugin links -lhidapi-hidraw, so hidapi is a SYSTEM shared library.
+//     It defines no hid_* symbol itself (nm -D --defined-only shows 0; all 7 are
+//     imported), and it makes no pthread_create call. The hidraw backend is a
+//     thin wrapper over read/write/ioctl on /dev/hidraw* and starts no threads
+//     of its own. Even if it did, that code would live in libhidapi-hidraw.so,
+//     which is never unloaded, so nothing there could point back into here.
+//   - fpp-vastfmt compiles hidapi's LIBUSB backend into its own .so (src/hid.o)
+//     and links -lusb-1.0. That backend runs a read thread per open device whose
+//     entry point is therefore inside the plugin - exactly the thing dlclose()
+//     would unmap.
+FPP_PLUGIN_SUPPORTS_UNLOAD()
 
 extern "C" {
     FPPPlugins::Plugin *createPlugin() {

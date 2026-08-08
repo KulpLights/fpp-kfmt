@@ -6,6 +6,7 @@
 	"homeURL": "https://github.com/KulpLights/fpp-kfmt",
 	"srcURL": "https://github.com/KulpLights/fpp-kfmt.git",
 	"bugURL": "https://github.com/KulpLights/fpp-kfmt/issues",
+	"iconURL": "https://raw.githubusercontent.com/KulpLights/fpp-kfmt/main/icon.png",
 	"versions": [
         {
             "minFPPVersion": "9.2",

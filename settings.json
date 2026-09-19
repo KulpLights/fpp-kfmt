@@ -28,7 +28,7 @@
         "IdleAction": {
             "name": "IdleAction",
             "description": "Playlist Idle Behavior",
-            "tip": "What to do if a playlist is not playing.",
+            "tip": "What to do if a playlist is not playing. Leave Alone and Mute keep the FM carrier on; Disable Carrier turns it off.",
             "restart": 0,
             "reboot": 0,
             "type": "select",

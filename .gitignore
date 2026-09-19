@@ -1,3 +1,5 @@
 *.o
 *.so
 *.d
+_deploy*.py
+_verify*.py

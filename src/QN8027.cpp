@@ -169,16 +169,23 @@ void QN8027::reset() {
     rdsReg.byte = 0x06;
     pacReg.byte = 0x7F;
 
+    // Quintic's own init waits ~20ms after SWRST; 5ms is not enough for the
+    // oscillator to come back, and later register writes are then ignored.
     write1Byte(REG_SYSTEM, 0x80);
-    waitForIdle(5);
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
     write1Byte(REG_SYSTEM, 0x00);
-    waitForIdle(5);
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
 
     setClockSource(0x00);
     setCrystalFreq(12);
     setCrystalCurrent(30);
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+
     setTxFreqDeviation(0x81);
     setTxPilotFreqDeviation(9);
+    // Chip default t1m_sel=10 turns the PA off after ~60s of silence.
+    // Playlist idle "Leave Alone"/"Mute" must keep the carrier, so disable it.
+    disablePAAutoOff();
     setTxPower(75);
 
     setTxInputBufferGain(0x03);
@@ -186,7 +193,8 @@ void QN8027::reset() {
     setAudioInpImp(20);
     RDS(1);
     setRDSFreqDeviation(10);
-    setChannel(channel);
+    // Channel is programmed by the caller with the configured frequency.
+    // Do not write the 87.9 MHz constructor default here.
 }
 
 void QN8027::waitForIdle(int maxms) {
@@ -195,7 +203,7 @@ void QN8027::waitForIdle(int maxms) {
     do {
         sr1.byte = read1Byte(REG_STATUS);
         if (sr1.fields.fsm == 2 || sr1.fields.fsm == 5) {
-            // 2 is idle, 5 is carrier off
+            // 2 Idle, 5 Transmitting
             return;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
@@ -204,28 +212,17 @@ void QN8027::waitForIdle(int maxms) {
 }
 
 void QN8027::calibrate() {
-    StatusReg sr1;
-    sr1.byte = read1Byte(REG_STATUS);
-
+    // Datasheet: assert RECAL, then de-assert so the FSM runs the power-up
+    // and calibration sequence. TXREQ must not be set in the same write —
+    // that skips audio-path calibration and leaves a silent carrier.
     systemReg.fields.recalibrate = 1;
-    systemReg.fields.radioStatus = 1;
+    systemReg.fields.radioStatus = 0;
     updateSYSTEM_REG();
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-
-    int waited = 0;
-    do {
-        sr1.byte = read1Byte(REG_STATUS);
-        if (sr1.fields.fsm == 2 || sr1.fields.fsm == 5 || sr1.fields.fsm == 0) {
-            // 2 idle, 5 transmitting, 0 reset
-            break;
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        waited += 1;
-    } while (waited < 50);
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
 
     systemReg.fields.recalibrate = 0;
     updateSYSTEM_REG();
-    waitForIdle(50);
+    waitForIdle(100);
 }
 
 // ---------------------------------------------------------------------------
@@ -253,9 +250,10 @@ void QN8027::setMonoAudio(bool mono) {
 
 void QN8027::startTransmit() {
     calibrate();
+    systemReg.fields.muteAudio = 0;
     systemReg.fields.radioStatus = 1;
     updateSYSTEM_REG();
-    waitForIdle(50);
+    waitForIdle(100);
 }
 
 void QN8027::stopTransmit() {
@@ -314,6 +312,13 @@ void QN8027::setCrystalCurrent(float percentOfMax) {  // current between 0 to 40
 
 void QN8027::setTxPilotFreqDeviation(uint8_t PGain) {
     gpltReg.fields.TxPilotFreqDeviation = PGain;
+    write1Byte(REG_GPLT, gpltReg.byte);
+}
+
+void QN8027::disablePAAutoOff() {
+    // REG_GPLT t1m_sel[1:0]: 00=58s, 01=59s, 10=60s (reset default), 11=never.
+    // Datasheet: "RF power automatically turned off if no input audio for 60s".
+    gpltReg.fields.PAAutoOffTime = 3;
     write1Byte(REG_GPLT, gpltReg.byte);
 }
 
@@ -398,6 +403,8 @@ void QN8027::printInfo() {
     LogInfo(VB_PLUGIN, "  Channel: %0.2f MHz\n", getChannel());
     LogInfo(VB_PLUGIN, "  Audio Peak: %d\n", statusReg.fields.audioPeak);
     LogInfo(VB_PLUGIN, "  FSM: %1X  %s\n", statusReg.fields.fsm, mapFSM(statusReg.fields.fsm));
+    LogInfo(VB_PLUGIN, "  GPLT: %02X  PA auto-off: %s\n",
+            gpltReg.byte, gpltReg.fields.PAAutoOffTime == 3 ? "never" : "timed");
     LogInfo(VB_PLUGIN, "  RDS Sent Status: %d\n", statusReg.fields.rdsSentStatus);
     uint8_t ant = read1Byte(REG_ANT);
     LogInfo(VB_PLUGIN, "  Antenna Tuning: %02X\n", ant);

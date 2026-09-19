@@ -18,6 +18,7 @@
 #include "Plugin.h"
 #include "log.h"
 #include "commands/Commands.h"
+#include "Player.h"
 #include "QN8027.h"
 #include "Warnings.h"
 
@@ -64,6 +65,8 @@ public:
     std::queue<std::function<void()>> functions;
 
     uint32_t stationIdCycleTime = 5;
+    bool     playlistActive = false;
+    bool     carrierEnabled = false;
 
     std::vector<std::string> stationIdStrings;
     int       curStationIdString = -1; // -1 = not yet started; advanced to 0 on first loop
@@ -112,7 +115,17 @@ public:
                         initializeQN8027();
                     });
                 }
-                stopAction();
+                // If a playlist is already running we must not apply idle
+                // mute/stop — the "start" callback already happened before
+                // this plugin was loaded. FPP will send "playing" (not
+                // "start") on a restart of the current playlist.
+                if (Player::INSTANCE.IsPlaying()) {
+                    playlistActive = true;
+                    startAction();
+                } else {
+                    playlistActive = false;
+                    stopAction();
+                }
                 formatAndSendText(settings["StationID"], 0);
                 condition.notify_all();
             }
@@ -185,6 +198,12 @@ public:
                 key.c_str(), value.c_str());
 
         if (key == "IdleAction") {
+            if (playlistActive || Player::INSTANCE.IsPlaying()) {
+                playlistActive = true;
+                startAction();
+            } else {
+                stopAction();
+            }
             return;
         } else if (key == "StationID") {
             formatAndSendText(settings["StationID"], 0);
@@ -193,11 +212,20 @@ public:
         } else if (key == "StationIDTime") {
             stationIdCycleTime = safeStoi(settings["StationIDTime"], 5, "StationIDTime");
         } else if (detected) {
-            std::lock_guard<std::mutex> lk(lock);
-            functions.emplace([this]() {
-                initializeQN8027();
-            });
-            condition.notify_all();
+            {
+                std::lock_guard<std::mutex> lk(lock);
+                functions.emplace([this]() {
+                    initializeQN8027();
+                });
+            }
+            // Re-init starts the transmitter unmuted. Put idle mute/carrier
+            // back if nothing is playing, otherwise restore the play path.
+            if (playlistActive || Player::INSTANCE.IsPlaying()) {
+                playlistActive = true;
+                startAction();
+            } else {
+                stopAction();
+            }
         }
     }
 
@@ -246,7 +274,9 @@ public:
 
             qn8027.RDS(1);
             qn8027.setMonoAudio(false);
+            qn8027.unmute();
             qn8027.startTransmit();
+            carrierEnabled = true;
             qn8027.printInfo();
         } catch (const std::exception &e) {
             LogErr(VB_PLUGIN, "KFMT: initializeQN8027() exception: %s\n", e.what());
@@ -334,47 +364,54 @@ public:
         if (!detected) return;
 
         std::lock_guard<std::mutex> lk(lock);
-        if (settings["IdleAction"] == "1") {
-            functions.emplace([this]() {
-                try {
-                    qn8027.unmute();
-                } catch (...) {
-                    LogErr(VB_PLUGIN, "KFMT: exception in unmute()\n");
-                }
-            });
-        } else if (settings["IdleAction"] == "2") {
-            functions.emplace([this]() {
-                try {
+        functions.emplace([this]() {
+            try {
+                // Always restore the audio path when something is playing.
+                // Leave Alone previously did nothing here, so a chip left
+                // muted or with the PA down stayed silent until a setting
+                // change re-ran initializeQN8027().
+                qn8027.unmute();
+                if (!carrierEnabled) {
                     qn8027.startTransmit();
-                } catch (...) {
-                    LogErr(VB_PLUGIN, "KFMT: exception in startTransmit()\n");
+                    carrierEnabled = true;
                 }
-            });
-        }
+            } catch (...) {
+                LogErr(VB_PLUGIN, "KFMT: exception in startAction()\n");
+            }
+        });
         condition.notify_all();
     }
 
+    // Realize the current IdleAction on the chip. Used after a playlist
+    // stops and when IdleAction is changed while idle — so switching from
+    // Disable Carrier back to Leave Alone or Mute turns the carrier on
+    // without needing to play something.
     void stopAction() {
         if (!detected) return;
 
         std::lock_guard<std::mutex> lk(lock);
-        if (settings["IdleAction"] == "1") {
-            functions.emplace([this]() {
-                try {
-                    qn8027.mute();
-                } catch (...) {
-                    LogErr(VB_PLUGIN, "KFMT: exception in mute()\n");
-                }
-            });
-        } else if (settings["IdleAction"] == "2") {
-            functions.emplace([this]() {
-                try {
+        functions.emplace([this]() {
+            try {
+                const std::string &idle = settings["IdleAction"];
+                LogInfo(VB_PLUGIN, "KFMT: applying idle action %s\n", idle.c_str());
+                if (idle == "2") {
                     qn8027.stopTransmit();
-                } catch (...) {
-                    LogErr(VB_PLUGIN, "KFMT: exception in stopTransmit()\n");
+                    carrierEnabled = false;
+                } else {
+                    if (!carrierEnabled) {
+                        qn8027.startTransmit();
+                        carrierEnabled = true;
+                    }
+                    if (idle == "1") {
+                        qn8027.mute();
+                    } else {
+                        qn8027.unmute();
+                    }
                 }
-            });
-        }
+            } catch (...) {
+                LogErr(VB_PLUGIN, "KFMT: exception in stopAction()\n");
+            }
+        });
         condition.notify_all();
     }
 
@@ -452,9 +489,16 @@ public:
                                   const std::string &action,
                                   const std::string &section,
                                   int item) override {
-        if (action == "start") {
+        LogInfo(VB_PLUGIN, "KFMT: playlistCallback action=%s section=%s item=%d\n",
+                action.c_str(), section.c_str(), item);
+
+        // FPP sends "start" only when coming from idle. Restarting an already
+        // running playlist (or advancing items) sends "playing".
+        if (action == "start" || action == "playing") {
+            playlistActive = true;
             startAction();
         } else if (action == "stop") {
+            playlistActive = false;
             artist.clear();
             title.clear();
             album.clear();
@@ -470,6 +514,11 @@ public:
 
     virtual void mediaCallback(const Json::Value &playlist,
                                const MediaDetails &mediaDetails) override {
+        // Audio is actually starting; undo idle mute even if we missed
+        // playlist "start" (plugin loaded mid-show, or FPP sent "playing").
+        playlistActive = true;
+        startAction();
+
         title       = mediaDetails.title;
         artist      = mediaDetails.artist;
         album       = mediaDetails.album;

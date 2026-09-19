@@ -57,6 +57,7 @@ public:
     void RDS(uint8_t onOffCtrl);
     void setRDSFreqDeviation(uint8_t RDSFreqDev);
     void setTxPilotFreqDeviation(uint8_t PGain);
+    void disablePAAutoOff();
 
     float getChannel();
 

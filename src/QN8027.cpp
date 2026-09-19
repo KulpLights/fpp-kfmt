@@ -30,12 +30,13 @@ constexpr uint8_t REG_PAC    = 0x10; // PA output power target control
 constexpr uint8_t REG_FDEV   = 0x11; // TX frequency deviation control
 constexpr uint8_t REG_RDS    = 0x12; // RDS deviation/mode
 constexpr uint8_t REG_ANT    = 0x1E; // Antenna tuning control
+constexpr uint8_t REG_PACAP  = 0x30; // PA capacitor auto-tune result
 
 // ---------------------------------------------------------------------------
 // FSM Mapping
 // ---------------------------------------------------------------------------
 
-static const char* mapFSM(uint8_t fsm) {
+const char* QN8027::fsmName(uint8_t fsm) {
     switch (fsm) {
         case 0: return "RESET";
         case 1: return "Calibrating";
@@ -211,6 +212,21 @@ void QN8027::waitForIdle(int maxms) {
     } while (waited < maxms);
 }
 
+void QN8027::waitForCalComplete(int maxms) {
+    StatusReg sr1;
+    int waited = 0;
+    do {
+        sr1.byte = read1Byte(REG_STATUS);
+        // Leave CALI (1) and PA Calibration (3/4) before treating the match
+        // as finished. Idle (2) and Transmitting (5) are terminal.
+        if (sr1.fields.fsm == 2 || sr1.fields.fsm == 5) {
+            return;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        waited += 5;
+    } while (waited < maxms);
+}
+
 void QN8027::calibrate() {
     // Datasheet: assert RECAL, then de-assert so the FSM runs the power-up
     // and calibration sequence. TXREQ must not be set in the same write —
@@ -222,7 +238,54 @@ void QN8027::calibrate() {
 
     systemReg.fields.recalibrate = 0;
     updateSYSTEM_REG();
-    waitForIdle(100);
+    waitForCalComplete(500);
+}
+
+bool QN8027::antennaMatchOk() {
+    uint8_t pacap = read1Byte(REG_PACAP);
+    // Quintic: PACAP 0x00-0x1F means the matching network covers this channel.
+    return pacap != 0xFF && pacap <= 0x1F;
+}
+
+bool QN8027::retuneAntenna(int retries) {
+    if (retries < 1) {
+        retries = 1;
+    }
+    const bool wantTx = systemReg.fields.radioStatus != 0;
+    bool ok = false;
+    for (int i = 0; i < retries; i++) {
+        calibrate();
+        if (wantTx) {
+            systemReg.fields.muteAudio = 0;
+            systemReg.fields.radioStatus = 1;
+            updateSYSTEM_REG();
+            waitForCalComplete(500);
+        }
+        uint8_t pacap = read1Byte(REG_PACAP);
+        uint8_t ant = read1Byte(REG_ANT);
+        ok = (pacap != 0xFF && pacap <= 0x1F);
+        LogInfo(VB_PLUGIN, "KFMT: antenna retune attempt %d/%d PACAP=%02X ANT=%02X %s\n",
+                i + 1, retries, pacap, ant, ok ? "ok" : "out of range");
+        if (ok) {
+            break;
+        }
+    }
+    return ok;
+}
+
+QN8027::RadioSnapshot QN8027::snapshot() {
+    RadioSnapshot s;
+    statusReg.byte = read1Byte(REG_STATUS);
+    s.fsm = statusReg.fields.fsm;
+    s.audioPeak = statusReg.fields.audioPeak;
+    s.ant = read1Byte(REG_ANT);
+    s.pacap = read1Byte(REG_PACAP);
+    s.pac = pacReg.fields.paTarget;
+    s.transmitting = systemReg.fields.radioStatus != 0;
+    s.muted = systemReg.fields.muteAudio != 0;
+    s.matchOk = (s.pacap != 0xFF && s.pacap <= 0x1F);
+    s.channel = getChannel();
+    return s;
 }
 
 // ---------------------------------------------------------------------------
@@ -248,12 +311,14 @@ void QN8027::setMonoAudio(bool mono) {
     rdsBuilder_.setStereo(!mono);
 }
 
-void QN8027::startTransmit() {
-    calibrate();
+void QN8027::startTransmit(bool recalibrate) {
+    if (recalibrate) {
+        calibrate();
+    }
     systemReg.fields.muteAudio = 0;
     systemReg.fields.radioStatus = 1;
     updateSYSTEM_REG();
-    waitForIdle(100);
+    waitForCalComplete(500);
 }
 
 void QN8027::stopTransmit() {
@@ -402,14 +467,16 @@ void QN8027::printInfo() {
     LogInfo(VB_PLUGIN, "Status: %02X   \n", statusReg.byte);
     LogInfo(VB_PLUGIN, "  Channel: %0.2f MHz\n", getChannel());
     LogInfo(VB_PLUGIN, "  Audio Peak: %d\n", statusReg.fields.audioPeak);
-    LogInfo(VB_PLUGIN, "  FSM: %1X  %s\n", statusReg.fields.fsm, mapFSM(statusReg.fields.fsm));
+    LogInfo(VB_PLUGIN, "  FSM: %1X  %s\n", statusReg.fields.fsm, fsmName(statusReg.fields.fsm));
     LogInfo(VB_PLUGIN, "  GPLT: %02X  PA auto-off: %s\n",
             gpltReg.byte, gpltReg.fields.PAAutoOffTime == 3 ? "never" : "timed");
     LogInfo(VB_PLUGIN, "  PAC: %u  (~%0.1f dBuV)\n",
             pacReg.fields.paTarget, 0.62f * pacReg.fields.paTarget + 71.0f);
-    LogInfo(VB_PLUGIN, "  RDS Sent Status: %d\n", statusReg.fields.rdsSentStatus);
+    uint8_t pacap = read1Byte(REG_PACAP);
     uint8_t ant = read1Byte(REG_ANT);
-    LogInfo(VB_PLUGIN, "  Antenna Tuning: %02X\n", ant);
+    LogInfo(VB_PLUGIN, "  PACAP: %02X  ANT: %02X  match: %s\n",
+            pacap, ant, (pacap != 0xFF && pacap <= 0x1F) ? "ok" : "out of range");
+    LogInfo(VB_PLUGIN, "  RDS Sent Status: %d\n", statusReg.fields.rdsSentStatus);
 }
 
 // ---------------------------------------------------------------------------

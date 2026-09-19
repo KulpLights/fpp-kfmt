@@ -9,7 +9,8 @@
                 "TransmitPower",
                 "InputImpedance",
                 "TXDigitalGain",
-                "TXInputBufferGain"
+                "TXInputBufferGain",
+                "AntennaRetunePolicy"
             ]   
         },
         "KFMTRDSSettings": {
@@ -128,6 +129,19 @@
             "default": 50,
             "min": 1,
             "max": 100
+        },
+        "AntennaRetunePolicy": {
+            "name": "AntennaRetunePolicy",
+            "description": "Antenna Retune Policy",
+            "tip": "The QN8027 auto-tunes its antenna match on recalibration. Manual Only never retunes except when you change frequency or press Retune Antenna — use this during a show. Retry If Bad On Init retries a poor match when the plugin starts.",
+            "restart": 0,
+            "reboot": 0,
+            "type": "select",
+            "default": 0,
+            "options": {
+                "Manual only": 0,
+                "Retry if bad on init": 1
+            }
         },
         "InputImpedance": {
             "name": "InputImpedance",

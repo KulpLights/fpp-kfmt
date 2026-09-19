@@ -37,8 +37,25 @@ public:
     void setPreemphasis(bool us);
     void setChannel(float freq);
 
+    // Recalibrate the PA / antenna match. Returns true if PACAP is in range.
+    bool retuneAntenna(int retries = 3);
+    bool antennaMatchOk();
 
-    void startTransmit();
+    struct RadioSnapshot {
+        uint8_t fsm = 0;
+        uint8_t audioPeak = 0;
+        uint8_t ant = 0;
+        uint8_t pacap = 0;
+        uint8_t pac = 0;
+        bool transmitting = false;
+        bool muted = false;
+        bool matchOk = false;
+        float channel = 0;
+    };
+    RadioSnapshot snapshot();
+    static const char* fsmName(uint8_t fsm);
+
+    void startTransmit(bool recalibrate = true);
     void stopTransmit();
     void mute();
     void unmute();
@@ -62,6 +79,7 @@ public:
     float getChannel();
 
     void waitForIdle(int maxms);
+    void waitForCalComplete(int maxms);
 private:
     I2CUtils *i2c = nullptr;
     CP2112 *cp2112 = nullptr;

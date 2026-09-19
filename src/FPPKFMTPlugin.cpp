@@ -8,6 +8,8 @@
 #include <mutex>
 #include <condition_variable>
 #include <cmath>
+#include <cstdio>
+#include <functional>
 
 #include <unistd.h>
 #include <termios.h>
@@ -21,6 +23,7 @@
 #include "Player.h"
 #include "QN8027.h"
 #include "Warnings.h"
+#include "fpphttp.h"
 
 namespace {
     int safeStoi(const std::string &s, int defVal, const char *name) {
@@ -53,7 +56,8 @@ namespace {
 
 class FPPKFMTPlugin
     : public FPPPlugins::Plugin
-    , public FPPPlugins::PlaylistEventPlugin {
+    , public FPPPlugins::PlaylistEventPlugin
+    , public FPPPlugins::APIProviderPlugin {
 public:
     QN8027 qn8027;
     bool   detected = false;
@@ -67,6 +71,8 @@ public:
     uint32_t stationIdCycleTime = 5;
     bool     playlistActive = false;
     bool     carrierEnabled = false;
+    std::string lastRetuneResult = "none";
+    bool        lastRetuneOk = false;
 
     std::vector<std::string> stationIdStrings;
     int       curStationIdString = -1; // -1 = not yet started; advanced to 0 on first loop
@@ -82,7 +88,8 @@ public:
 
     FPPKFMTPlugin()
         : FPPPlugins::Plugin("fpp-kfmt", true)
-        , FPPPlugins::PlaylistEventPlugin() {
+        , FPPPlugins::PlaylistEventPlugin()
+        , FPPPlugins::APIProviderPlugin() {
         LogDebug(VB_PLUGIN, "KFMT: constructor start\n");
 
         // Absolutely no exceptions escape this constructor.
@@ -151,6 +158,7 @@ public:
     // the carrier is off before the plugin goes. Everything here is synchronous,
     // so no readiness predicate is needed.
     virtual std::function<bool()> shutdown() override {
+        unregisterApis();
         stopSending();
         // This plugin raised the warning, so it takes it back rather than
         // leaving a stale one on the UI for a plugin that is no longer loaded.
@@ -211,22 +219,62 @@ public:
             return;
         } else if (key == "StationIDTime") {
             stationIdCycleTime = safeStoi(settings["StationIDTime"], 5, "StationIDTime");
-        } else if (detected) {
-            {
-                std::lock_guard<std::mutex> lk(lock);
-                functions.emplace([this]() {
-                    initializeQN8027();
-                });
-            }
-            // Re-init starts the transmitter unmuted. Put idle mute/carrier
-            // back if nothing is playing, otherwise restore the play path.
-            if (playlistActive || Player::INSTANCE.IsPlaying()) {
-                playlistActive = true;
-                startAction();
-            } else {
-                stopAction();
-            }
+        } else if (key == "AntennaRetunePolicy") {
+            return;
+        } else if (key == "Frequency") {
+            // Channel change retunes the antenna; a full bring-up is required.
+            queueRadioWork([this]() { initializeQN8027(); });
+            restoreAfterRadioChange();
+        } else if (key == "TransmitPower" && detected) {
+            queueRadioWork([this]() { applyTransmitPower(); });
+            restoreAfterRadioChange();
+        } else if (detected &&
+                   (key == "Preemphasis" || key == "InputImpedance" ||
+                    key == "TXDigitalGain" || key == "TXInputBufferGain" ||
+                    key == "ProgramType" || key == "StationCode")) {
+            queueRadioWork([this]() { applyLiveRadioSetting(); });
         }
+    }
+
+    void restoreAfterRadioChange() {
+        if (playlistActive || Player::INSTANCE.IsPlaying()) {
+            playlistActive = true;
+            startAction();
+        } else {
+            stopAction();
+        }
+    }
+
+    void queueRadioWork(std::function<void()> fn) {
+        std::lock_guard<std::mutex> lk(lock);
+        functions.emplace(std::move(fn));
+        condition.notify_all();
+    }
+
+    // Run I2C work on the sender thread and wait. HTTP handlers must not talk
+    // to the chip themselves — that races the RDS loop.
+    bool runOnRadioThread(const std::function<void()> &fn, int timeoutMs) {
+        if (!detected || !running) {
+            return false;
+        }
+        std::mutex doneMutex;
+        std::condition_variable doneCv;
+        bool done = false;
+        {
+            std::lock_guard<std::mutex> lk(lock);
+            functions.emplace([&]() {
+                fn();
+                {
+                    std::lock_guard<std::mutex> g(doneMutex);
+                    done = true;
+                }
+                doneCv.notify_one();
+            });
+        }
+        condition.notify_all();
+        std::unique_lock<std::mutex> ul(doneMutex);
+        return doneCv.wait_for(ul, std::chrono::milliseconds(timeoutMs),
+                               [&]() { return done; });
     }
 
     void initializeQN8027() {
@@ -280,14 +328,184 @@ public:
             qn8027.RDS(1);
             qn8027.setMonoAudio(false);
             qn8027.unmute();
-            qn8027.startTransmit();
+            qn8027.startTransmit(true);
             carrierEnabled = true;
+            if (settings["AntennaRetunePolicy"] == "1" && !qn8027.antennaMatchOk()) {
+                lastRetuneOk = qn8027.retuneAntenna(3);
+                lastRetuneResult = lastRetuneOk ? "ok" : "out of range";
+            }
             qn8027.printInfo();
         } catch (const std::exception &e) {
             LogErr(VB_PLUGIN, "KFMT: initializeQN8027() exception: %s\n", e.what());
         } catch (...) {
             LogErr(VB_PLUGIN, "KFMT: initializeQN8027() unknown exception\n");
         }
+    }
+
+    uint8_t mappedPaTarget() {
+        float ui = safeStof(settings["TransmitPower"], 50.0f, "TransmitPower");
+        if (ui < 0.0f) ui = 0.0f;
+        if (ui > 100.0f) ui = 100.0f;
+        return static_cast<uint8_t>(std::round(20.0f + (ui / 100.0f) * 55.0f));
+    }
+
+    void applyTransmitPower() {
+        uint8_t pac = mappedPaTarget();
+        LogInfo(VB_PLUGIN, "KFMT: TransmitPower UI=%s -> PAC=%u\n",
+                settings["TransmitPower"].c_str(), pac);
+        qn8027.setTxPower(pac);
+        if (carrierEnabled) {
+            qn8027.stopTransmit();
+            qn8027.startTransmit(false);
+            carrierEnabled = true;
+        }
+    }
+
+    void applyLiveRadioSetting() {
+        uint8_t pe = static_cast<uint8_t>(
+            safeStoi(settings["Preemphasis"], 1, "Preemphasis"));
+        qn8027.setPreemphasis(pe);
+        uint8_t inputImpd = static_cast<uint8_t>(
+            safeStoi(settings["InputImpedance"], 20, "InputImpedance"));
+        qn8027.setAudioInpImp(inputImpd);
+        uint8_t ibg = static_cast<uint8_t>(
+            safeStoi(settings["TXInputBufferGain"], 3, "TXInputBufferGain"));
+        qn8027.setTxInputBufferGain(ibg);
+        uint8_t dg = static_cast<uint8_t>(
+            safeStoi(settings["TXDigitalGain"], 0, "TXDigitalGain"));
+        qn8027.setTxDigitalGain(dg);
+        std::string sc = settings["StationCode"];
+        while (sc.length() < 4) sc += "A";
+        qn8027.setStationCode(sc);
+        uint8_t pt = static_cast<uint8_t>(
+            safeStoi(settings["ProgramType"], 0, "ProgramType"));
+        qn8027.setProgramType(pt);
+    }
+
+    Json::Value statusJson() {
+        Json::Value root;
+        root["detected"] = detected;
+        root["playlistActive"] = playlistActive;
+        root["carrierEnabled"] = carrierEnabled;
+        root["lastRetune"] = lastRetuneResult;
+        root["lastRetuneOk"] = lastRetuneOk;
+        if (!detected) {
+            return root;
+        }
+        auto s = qn8027.snapshot();
+        root["fsm"] = s.fsm;
+        root["fsmName"] = QN8027::fsmName(s.fsm);
+        root["audioPeak"] = s.audioPeak;
+        root["ant"] = s.ant;
+        root["pacap"] = s.pacap;
+        char antHex[8];
+        char pacapHex[8];
+        snprintf(antHex, sizeof(antHex), "%02X", s.ant);
+        snprintf(pacapHex, sizeof(pacapHex), "%02X", s.pacap);
+        root["antHex"] = antHex;
+        root["pacapHex"] = pacapHex;
+        root["pac"] = s.pac;
+        root["transmitting"] = s.transmitting;
+        root["muted"] = s.muted;
+        root["matchOk"] = s.matchOk;
+        root["channel"] = s.channel;
+        root["antRail"] = (s.ant == 0x3F);
+        root["audioClip"] = (s.audioPeak >= 15);
+        return root;
+    }
+
+    void registerApis() override {
+        auto handler = [this](const HttpRequestPtr &req, HttpCallback &&callback) {
+            handleKfmtApi(req, std::move(callback));
+        };
+        FPPPlugins::registerPluginApi("/kfmt", handler, {drogon::Get, drogon::Post}, false);
+        FPPPlugins::registerPluginApi("/kfmt/retune", handler, {drogon::Get, drogon::Post}, false);
+        FPPPlugins::registerPluginApi("/kfmt/clearpeak", handler, {drogon::Get, drogon::Post}, false);
+    }
+
+    void unregisterApis() override {
+        FPPPlugins::unregisterPluginApi("/kfmt");
+        FPPPlugins::unregisterPluginApi("/kfmt/retune");
+        FPPPlugins::unregisterPluginApi("/kfmt/clearpeak");
+    }
+
+    void handleKfmtApi(const HttpRequestPtr &req, HttpCallback &&callback) {
+        const std::string path = req->path();
+        const auto method = req->method();
+        Json::Value root;
+
+        if (path.find("clearpeak") != std::string::npos && method == drogon::Post) {
+            if (!detected) {
+                root["ok"] = false;
+                root["error"] = "QN8027 not detected";
+                callback(makeStringResponse(root.toStyledString(), 503, "application/json"));
+                return;
+            }
+            bool finished = runOnRadioThread([&]() {
+                qn8027.clearAudioPeak();
+                std::this_thread::sleep_for(std::chrono::milliseconds(20));
+                root = statusJson();
+                root["ok"] = true;
+            }, 2000);
+            if (!finished) {
+                root["ok"] = false;
+                root["error"] = "timeout";
+                callback(makeStringResponse(root.toStyledString(), 504, "application/json"));
+                return;
+            }
+            callback(makeStringResponse(root.toStyledString(), 200, "application/json"));
+            return;
+        }
+
+        if (path.find("retune") != std::string::npos && method == drogon::Post) {
+            if (!detected) {
+                root["ok"] = false;
+                root["error"] = "QN8027 not detected";
+                callback(makeStringResponse(root.toStyledString(), 503, "application/json"));
+                return;
+            }
+            bool ok = false;
+            bool finished = runOnRadioThread([&]() {
+                ok = qn8027.retuneAntenna(3);
+                lastRetuneOk = ok;
+                lastRetuneResult = ok ? "ok" : "out of range";
+                const bool wantCarrier =
+                    playlistActive || settings["IdleAction"] != "2";
+                if (wantCarrier) {
+                    qn8027.startTransmit(false);
+                    carrierEnabled = true;
+                    if (!playlistActive && settings["IdleAction"] == "1") {
+                        qn8027.mute();
+                    }
+                } else {
+                    qn8027.stopTransmit();
+                    carrierEnabled = false;
+                }
+            }, 8000);
+            if (!finished) {
+                root["ok"] = false;
+                root["error"] = "timeout";
+                callback(makeStringResponse(root.toStyledString(), 504, "application/json"));
+                return;
+            }
+            finished = runOnRadioThread([&]() { root = statusJson(); }, 2000);
+            if (!finished) {
+                root["ok"] = ok;
+            } else {
+                root["ok"] = ok;
+            }
+            callback(makeStringResponse(root.toStyledString(), 200, "application/json"));
+            return;
+        }
+
+        bool finished = runOnRadioThread([&]() { root = statusJson(); }, 2000);
+        if (!finished) {
+            root["detected"] = detected;
+            root["error"] = "timeout";
+            callback(makeStringResponse(root.toStyledString(), 504, "application/json"));
+            return;
+        }
+        callback(makeStringResponse(root.toStyledString(), 200, "application/json"));
     }
 
     void run() {
@@ -377,7 +595,7 @@ public:
                 // change re-ran initializeQN8027().
                 qn8027.unmute();
                 if (!carrierEnabled) {
-                    qn8027.startTransmit();
+                    qn8027.startTransmit(false);
                     carrierEnabled = true;
                 }
             } catch (...) {
@@ -404,7 +622,7 @@ public:
                     carrierEnabled = false;
                 } else {
                     if (!carrierEnabled) {
-                        qn8027.startTransmit();
+                        qn8027.startTransmit(false);
                         carrierEnabled = true;
                     }
                     if (idle == "1") {
@@ -580,6 +798,7 @@ public:
         setIfNotFound("TXDigitalGain", "0");
         setIfNotFound("InputImpedance", "20");
         setIfNotFound("TransmitPower", "50");
+        setIfNotFound("AntennaRetunePolicy", "0");
 
         setIfNotFound("TXFreqDeviation", "129");
         setIfNotFound("RDSFreqDeviation", "10");
@@ -600,8 +819,9 @@ public:
 };
 
 // Safe to dlclose() on unload: the only thread is the I2C sender, and shutdown()
-// stops and joins it. No timers, no CurlManager requests, no epoll descriptors,
-// no commands and no HTTP routes. The settings FileMonitor entry is registered
+// stops and joins it. HTTP routes go through registerPluginApi() and are
+// withdrawn in unregisterApis()/shutdown(). No timers, no CurlManager requests,
+// no epoll descriptors, no commands. The settings FileMonitor entry is registered
 // and removed by FPPPlugins::Plugin itself, in its destructor, which runs before
 // the library is unmapped.
 //

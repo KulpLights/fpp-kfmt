@@ -16,6 +16,7 @@
         "KFMTRDSSettings": {
             "description": "RDS Settings",
             "settings": [
+                "RDSEnable",
                 "ProgramType",
                 "StationCode",
                 "StationID",
@@ -182,6 +183,19 @@
             "min": 0,
             "max": 5,
             "level": 1
+        },
+        "RDSEnable": {
+            "name": "RDSEnable",
+            "description": "RDS",
+            "tip": "Send RDS (station name, song info, RT+) on the FM signal. Off leaves the audio carrier unchanged but radios will not show text.",
+            "restart": 0,
+            "reboot": 0,
+            "type": "select",
+            "default": 1,
+            "options": {
+                "On": 1,
+                "Off": 0
+            }
         },
         "ProgramType": {
             "name": "ProgramType",

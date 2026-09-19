@@ -231,7 +231,8 @@ public:
         } else if (detected &&
                    (key == "Preemphasis" || key == "InputImpedance" ||
                     key == "TXDigitalGain" || key == "TXInputBufferGain" ||
-                    key == "ProgramType" || key == "StationCode")) {
+                    key == "ProgramType" || key == "StationCode" ||
+                    key == "RDSEnable")) {
             queueRadioWork([this]() { applyLiveRadioSetting(); });
         }
     }
@@ -325,7 +326,7 @@ public:
                     ui, pac, 0.62f * pac + 71.0f);
             qn8027.setTxPower(pac);
 
-            qn8027.RDS(1);
+            qn8027.RDS(rdsEnabled() ? 1 : 0);
             qn8027.setMonoAudio(false);
             qn8027.unmute();
             qn8027.startTransmit(true);
@@ -380,6 +381,15 @@ public:
         uint8_t pt = static_cast<uint8_t>(
             safeStoi(settings["ProgramType"], 0, "ProgramType"));
         qn8027.setProgramType(pt);
+        qn8027.RDS(rdsEnabled() ? 1 : 0);
+    }
+
+    bool rdsEnabled() const {
+        auto it = settings.find("RDSEnable");
+        if (it == settings.end()) {
+            return true;
+        }
+        return it->second != "0";
     }
 
     Json::Value statusJson() {
@@ -525,7 +535,7 @@ public:
             }
 
             // Send the current PS fragment every ~400 ms so receivers can lock on quickly.
-            if (ct > nextPSTime && curStationIdString >= 0 &&
+            if (rdsEnabled() && ct > nextPSTime && curStationIdString >= 0 &&
                     curStationIdString < (int)stationIdStrings.size()) {
                 std::string s = stationIdStrings[curStationIdString];
                 if (detected) {
@@ -543,7 +553,7 @@ public:
             }
 
             // Send RT/RT+ every 2 seconds (includes Group 2A RT so all receivers benefit).
-            if (ct > nextRDSTime) {
+            if (rdsEnabled() && ct > nextRDSTime) {
                 if (detected) {
                     functions.emplace([this]() {
                         try {
@@ -787,6 +797,7 @@ public:
         setIfNotFound("IdleAction", "0");
         setIfNotFound("Preemphasis", "1");
 
+        setIfNotFound("RDSEnable", "1");
         setIfNotFound("StationID", "Merry   Christ- mas", true);
         setIfNotFound("StationName", "", true);
         setIfNotFound("StationURL", "", true);

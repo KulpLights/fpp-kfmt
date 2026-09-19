@@ -405,6 +405,8 @@ void QN8027::printInfo() {
     LogInfo(VB_PLUGIN, "  FSM: %1X  %s\n", statusReg.fields.fsm, mapFSM(statusReg.fields.fsm));
     LogInfo(VB_PLUGIN, "  GPLT: %02X  PA auto-off: %s\n",
             gpltReg.byte, gpltReg.fields.PAAutoOffTime == 3 ? "never" : "timed");
+    LogInfo(VB_PLUGIN, "  PAC: %u  (~%0.1f dBuV)\n",
+            pacReg.fields.paTarget, 0.62f * pacReg.fields.paTarget + 71.0f);
     LogInfo(VB_PLUGIN, "  RDS Sent Status: %d\n", statusReg.fields.rdsSentStatus);
     uint8_t ant = read1Byte(REG_ANT);
     LogInfo(VB_PLUGIN, "  Antenna Tuning: %02X\n", ant);

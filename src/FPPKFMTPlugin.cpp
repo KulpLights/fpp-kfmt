@@ -265,12 +265,17 @@ public:
                 safeStoi(settings["TXDigitalGain"], 0, "TXDigitalGain"));
             qn8027.setTxDigitalGain(dg);
 
-            float tp = safeStof(settings["TransmitPower"], 100.0f, "TransmitPower");
-            tp /= 55.0f;
-            tp += 20.0f;
-            if (tp < 20.0f) tp = 20.0f;
-            if (tp > 75.0f) tp = 75.0f;
-            qn8027.setTxPower(static_cast<uint8_t>(std::round(tp)));
+            // UI 1–100 -> PAC 20–75. The old code did ui/55+20, which mapped
+            // the whole slider to PAC 20–22 (~1 dB), so Airspy barely moved.
+            // Datasheet: Power(dBuV) = 0.62*PAC + 71, PAC valid 20–75.
+            float ui = safeStof(settings["TransmitPower"], 50.0f, "TransmitPower");
+            if (ui < 0.0f) ui = 0.0f;
+            if (ui > 100.0f) ui = 100.0f;
+            float tp = 20.0f + (ui / 100.0f) * 55.0f;
+            uint8_t pac = static_cast<uint8_t>(std::round(tp));
+            LogInfo(VB_PLUGIN, "KFMT: TransmitPower UI=%0.0f -> PAC=%u (~%0.1f dBuV)\n",
+                    ui, pac, 0.62f * pac + 71.0f);
+            qn8027.setTxPower(pac);
 
             qn8027.RDS(1);
             qn8027.setMonoAudio(false);
@@ -574,7 +579,7 @@ public:
         setIfNotFound("TXInputBufferGain", "3");
         setIfNotFound("TXDigitalGain", "0");
         setIfNotFound("InputImpedance", "20");
-        setIfNotFound("TransmitPower", "100");
+        setIfNotFound("TransmitPower", "50");
 
         setIfNotFound("TXFreqDeviation", "129");
         setIfNotFound("RDSFreqDeviation", "10");

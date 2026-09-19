@@ -121,11 +121,11 @@
         "TransmitPower": {
             "name": "TransmitPower",
             "description": "Transmit Power",
-            "tip": "Transmit Power Level. Higher values increase range but also increase distortion.",
+            "tip": "Transmit power 1–100, mapped across the QN8027 PA range (about 83–117 dBµV). Higher values increase range but also increase distortion.",
             "restart": 0,
             "reboot": 0,
             "type": "number",
-            "default": 100,
+            "default": 50,
             "min": 1,
             "max": 100
         },

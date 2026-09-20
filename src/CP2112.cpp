@@ -214,7 +214,7 @@ void CP2112::writeByteData(uint8_t regAddr, uint8_t data) {
              regAddr, data);
 }
 
-uint8_t CP2112::readByteData(uint8_t regAddr) {
+uint8_t CP2112::readByteData(uint8_t regAddr, bool resetOnFail) {
     if (!h)
         return 0xFF;
 
@@ -230,7 +230,9 @@ uint8_t CP2112::readByteData(uint8_t regAddr) {
 
     if (hid_write(h, cmd.data(), cmd.size()) < 0) {
         LogErr(VB_PLUGIN, "CP2112: readByteData HID write error\n");
-        handleI2CError();
+        if (resetOnFail) {
+            handleI2CError();
+        }
         return 0xFF;
     }
 
@@ -239,7 +241,9 @@ uint8_t CP2112::readByteData(uint8_t regAddr) {
         std::vector<uint8_t> statusCmd = {CMD_I2C_STATUS, 0x01};
         if (hid_write(h, statusCmd.data(), statusCmd.size()) < 0) {
             LogErr(VB_PLUGIN, "CP2112: readByteData status HID write error\n");
-            handleI2CError();
+            if (resetOnFail) {
+                handleI2CError();
+            }
             return 0xFF;
         }
 
@@ -252,7 +256,9 @@ uint8_t CP2112::readByteData(uint8_t regAddr) {
             std::vector<uint8_t> readCmd = {CMD_I2C_READ_FORCE, 0x00, 0x01};
             if (hid_write(h, readCmd.data(), readCmd.size()) < 0) {
                 LogErr(VB_PLUGIN, "CP2112: readByteData force HID write error\n");
-                handleI2CError();
+                if (resetOnFail) {
+                    handleI2CError();
+                }
                 return 0xFF;
             }
 
@@ -271,7 +277,9 @@ uint8_t CP2112::readByteData(uint8_t regAddr) {
     LogErr(VB_PLUGIN,
            "CP2112: Byte Data Read Error for register 0x%02X\n",
            regAddr);
-    handleI2CError();
+    if (resetOnFail) {
+        handleI2CError();
+    }
     return 0xFF;
 }
 

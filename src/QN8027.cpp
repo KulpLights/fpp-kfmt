@@ -117,6 +117,15 @@ uint8_t QN8027::read1Byte(uint8_t regAddr) {
     return 0xFF;
 }
 
+uint8_t QN8027::read1ByteOptional(uint8_t regAddr) {
+    if (i2c) {
+        return i2c->readByteData(regAddr);
+    } else if (cp2112) {
+        return cp2112->readByteData(regAddr, false);
+    }
+    return 0xFF;
+}
+
 // ---------------------------------------------------------------------------
 // Detection
 // ---------------------------------------------------------------------------
@@ -203,8 +212,8 @@ void QN8027::waitForIdle(int maxms) {
     int waited = 0;
     do {
         sr1.byte = read1Byte(REG_STATUS);
-        if (sr1.fields.fsm == 2 || sr1.fields.fsm == 5) {
-            // 2 Idle, 5 Transmitting
+        if (sr1.fields.fsm == 2 || sr1.fields.fsm == 5 || sr1.fields.fsm == 6) {
+            // 2 Idle, 5 Transmitting, 6 PA Off (after TXREQ=0)
             return;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
@@ -278,8 +287,9 @@ QN8027::RadioSnapshot QN8027::snapshot() {
     statusReg.byte = read1Byte(REG_STATUS);
     s.fsm = statusReg.fields.fsm;
     s.audioPeak = statusReg.fields.audioPeak;
-    s.ant = read1Byte(REG_ANT);
-    s.pacap = read1Byte(REG_PACAP);
+    // 0x1E/0x30 are not always ACK'd when the PA is down; do not reset USB.
+    s.ant = read1ByteOptional(REG_ANT);
+    s.pacap = read1ByteOptional(REG_PACAP);
     s.pac = pacReg.fields.paTarget;
     s.transmitting = systemReg.fields.radioStatus != 0;
     s.muted = systemReg.fields.muteAudio != 0;

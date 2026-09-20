@@ -10,6 +10,7 @@
 #include <cmath>
 #include <cstdio>
 #include <functional>
+#include <memory>
 
 #include <unistd.h>
 #include <termios.h>
@@ -73,6 +74,12 @@ public:
     bool     carrierEnabled = false;
     std::string lastRetuneResult = "none";
     bool        lastRetuneOk = false;
+
+    struct RadioWaitState {
+        std::mutex mutex;
+        std::condition_variable cv;
+        bool done = false;
+    };
 
     std::vector<std::string> stationIdStrings;
     int       curStationIdString = -1; // -1 = not yet started; advanced to 0 on first loop
@@ -254,28 +261,29 @@ public:
 
     // Run I2C work on the sender thread and wait. HTTP handlers must not talk
     // to the chip themselves — that races the RDS loop.
+    // Completion state lives on the heap so a wait timeout cannot free the
+    // stack while the radio thread is still finishing the job (that UAF
+    // SIGSEGV'd fppd after Disable Carrier).
     bool runOnRadioThread(const std::function<void()> &fn, int timeoutMs) {
         if (!detected || !running) {
             return false;
         }
-        std::mutex doneMutex;
-        std::condition_variable doneCv;
-        bool done = false;
+        auto state = std::make_shared<RadioWaitState>();
         {
             std::lock_guard<std::mutex> lk(lock);
-            functions.emplace([&]() {
+            functions.emplace([fn, state]() {
                 fn();
                 {
-                    std::lock_guard<std::mutex> g(doneMutex);
-                    done = true;
+                    std::lock_guard<std::mutex> g(state->mutex);
+                    state->done = true;
                 }
-                doneCv.notify_one();
+                state->cv.notify_one();
             });
         }
         condition.notify_all();
-        std::unique_lock<std::mutex> ul(doneMutex);
-        return doneCv.wait_for(ul, std::chrono::milliseconds(timeoutMs),
-                               [&]() { return done; });
+        std::unique_lock<std::mutex> ul(state->mutex);
+        return state->cv.wait_for(ul, std::chrono::milliseconds(timeoutMs),
+                                  [state]() { return state->done; });
     }
 
     void initializeQN8027() {
@@ -535,7 +543,7 @@ public:
             }
 
             // Send the current PS fragment every ~400 ms so receivers can lock on quickly.
-            if (rdsEnabled() && ct > nextPSTime && curStationIdString >= 0 &&
+            if (rdsEnabled() && carrierEnabled && ct > nextPSTime && curStationIdString >= 0 &&
                     curStationIdString < (int)stationIdStrings.size()) {
                 std::string s = stationIdStrings[curStationIdString];
                 if (detected) {
@@ -553,7 +561,7 @@ public:
             }
 
             // Send RT/RT+ every 2 seconds (includes Group 2A RT so all receivers benefit).
-            if (rdsEnabled() && ct > nextRDSTime) {
+            if (rdsEnabled() && carrierEnabled && ct > nextRDSTime) {
                 if (detected) {
                     functions.emplace([this]() {
                         try {

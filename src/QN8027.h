@@ -86,6 +86,7 @@ private:
 
     void write1Byte(uint8_t regAddr, uint8_t data);
     uint8_t read1Byte(uint8_t regAddr);
+    uint8_t read1ByteOptional(uint8_t regAddr);
     void updateSYSTEM_REG();
     void waitForRDSSend();
     void sendRDS(uint8_t by0, uint8_t by1, uint8_t by2, uint8_t by3, uint8_t by4, uint8_t by5, uint8_t by6, uint8_t by7);

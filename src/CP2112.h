@@ -18,7 +18,7 @@ public:
 
     // Write/Read operations matching I2CUtils interface
     void writeByteData(uint8_t regAddr, uint8_t data);
-    uint8_t readByteData(uint8_t regAddr);
+    uint8_t readByteData(uint8_t regAddr, bool resetOnFail = true);
 
     void writeWordData(uint8_t regAddr, uint16_t data);
     uint16_t readWordData(uint8_t regAddr);

@@ -3,6 +3,25 @@
 PrintSettingGroup("KFMTRadio", "", "", 1, "fpp-kfmt");
 PrintSettingGroup("KFMTRDSSettings", "", "", 1, "fpp-kfmt");
 ?>
+<style>
+#kfmtPsPreviewWrap { margin: 0.35rem 0 0 0; max-width: 100%; }
+#kfmtPsChunks { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.95rem; letter-spacing: 0.02em; }
+.kfmt-ps-chunk {
+    display: inline-block;
+    border: 1px solid #888;
+    border-radius: 3px;
+    padding: 0.15rem 0.35rem;
+    margin: 0.15rem 0.35rem 0.15rem 0;
+    background: rgba(127,127,127,0.12);
+    white-space: pre;
+}
+.kfmt-ps-space { opacity: 0.45; }
+#kfmtPsMeta { font-size: 0.85rem; opacity: 0.8; margin-top: 0.2rem; }
+</style>
+<div id="kfmtPsPreviewWrap" style="display:none;">
+  <div id="kfmtPsChunks"></div>
+  <div id="kfmtPsMeta"></div>
+</div>
 <h2>Transmitter Status</h2>
 <p class="text-body">Match is judged from the QN8027 PACAP register (0x00–0x1F is in range). Retune after moving the antenna or enclosure. During a show, leave the policy on Manual only and do not press Retune unless you mean to.</p>
 <div class="mb-3">
@@ -90,6 +109,60 @@ function kfmtClearPeak() {
         btn.disabled = false;
     });
 }
+function kfmtFindStationIdInput() {
+    return document.getElementById('StationID')
+        || document.querySelector('input[name="StationID"]')
+        || document.querySelector('#pluginSetting_StationID input')
+        || document.querySelector('input[id*="StationID"]');
+}
+function kfmtPsPreviewFrom(value) {
+    var chunksEl = document.getElementById('kfmtPsChunks');
+    var metaEl = document.getElementById('kfmtPsMeta');
+    var wrap = document.getElementById('kfmtPsPreviewWrap');
+    if (!chunksEl || !metaEl || !wrap) return;
+    wrap.style.display = '';
+    var s = value || '';
+    var n = Math.max(1, Math.ceil(s.length / 8) || 1);
+    if (s.length === 0) n = 1;
+    chunksEl.textContent = '';
+    for (var i = 0; i < n; i++) {
+        var part = s.substr(i * 8, 8);
+        while (part.length < 8) part += ' ';
+        var box = document.createElement('span');
+        box.className = 'kfmt-ps-chunk';
+        box.title = 'Screen ' + (i + 1);
+        for (var c = 0; c < part.length; c++) {
+            if (part.charAt(c) === ' ') {
+                var sp = document.createElement('span');
+                sp.className = 'kfmt-ps-space';
+                sp.textContent = '·';
+                box.appendChild(sp);
+            } else {
+                box.appendChild(document.createTextNode(part.charAt(c)));
+            }
+        }
+        chunksEl.appendChild(box);
+    }
+    var screens = n + (n === 1 ? ' screen' : ' screens');
+    metaEl.textContent = s.length + ' character' + (s.length === 1 ? '' : 's') + ' → ' + screens
+        + ' (rotates with Station ID Display Time)';
+}
+function kfmtHookStationIdPreview() {
+    var input = kfmtFindStationIdInput();
+    var wrap = document.getElementById('kfmtPsPreviewWrap');
+    if (!input || !wrap) return;
+    var fieldCol = document.querySelector('#StationIDRow .printSettingFieldCol')
+        || input.closest('.printSettingFieldCol')
+        || input.parentNode;
+    if (fieldCol) {
+        fieldCol.appendChild(wrap);
+    }
+    var update = function () { kfmtPsPreviewFrom(input.value); };
+    input.addEventListener('input', update);
+    input.addEventListener('change', update);
+    update();
+}
+kfmtHookStationIdPreview();
 kfmtRefreshStatus();
 setInterval(kfmtRefreshStatus, 1500);
 </script>

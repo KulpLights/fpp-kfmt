@@ -68,7 +68,7 @@
         "StationID": {
             "name": "StationID",
             "description": "Station ID",
-            "tip": "Station Identifier, broken into 8 character sections when sent.",
+            "tip": "Station Identifier, sent as rotating 8-character RDS screens. Each preview box is one screen. Spaces are shown as · so padding is visible; they still save as spaces. Placeholders like {Title} count as typed characters here and expand when a song plays. Station ID Display Time is how long each screen stays.",
             "restart": 0,
             "reboot": 0,
             "type": "text",

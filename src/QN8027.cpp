@@ -206,9 +206,13 @@ void QN8027::updateSYSTEM_REG() {
 // ---------------------------------------------------------------------------
 
 void QN8027::reset() {
+    // These shadow the chip's post-SWRST register values, read back from
+    // hardware. Every partial update below rewrites a whole byte from its
+    // shadow, so a shadow that disagrees with the chip silently clobbers the
+    // fields it is not trying to change.
     systemReg.byte = 0x00;
     chReg = 0;
-    gpltReg.byte = 0xA5;
+    gpltReg.byte = 0xA9;
     xtlReg.byte = 0x10;
     vgaReg.byte = 0xB2;
     rdsReg.byte = 0x06;
@@ -426,8 +430,15 @@ void QN8027::setTxPilotFreqDeviation(uint8_t PGain) {
 }
 
 void QN8027::disablePAAutoOff() {
-    // REG_GPLT t1m_sel[1:0]: 00=58s, 01=59s, 10=60s (reset default), 11=never.
-    // Datasheet: "RF power automatically turned off if no input audio for 60s".
+    // REG_GPLT is tc[7] / priv_en[6] / t1m_sel[5:4] / gain_txplt[3:0], and
+    // t1m_sel is 00=57s, 01=58s, 10=59s (reset default), 11=never. The bit
+    // positions matter: reading t1m_sel one bit over is self-consistent
+    // enough to look right, but would make this write a no-op and enable
+    // priv_en as a side effect.
+    //
+    // Measured on hardware with a silent input: at the reset default the FSM
+    // goes 5 (Transmitting) -> 6 (PA Off) within a minute, and with this set
+    // it was still transmitting after three.
     gpltReg.fields.PAAutoOffTime = 3;
     write1Byte(REG_GPLT, gpltReg.byte);
 }

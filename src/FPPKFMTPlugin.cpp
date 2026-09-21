@@ -531,8 +531,11 @@ public:
             return root;
         }
 
-        root["link"] = "ok";
         auto s = qn8027.snapshot();
+        // A failed observer read no longer resets the bus, so say the values
+        // are stale instead of pretending the transmitter went away.
+        root["link"] = s.valid ? "ok" : "stale read";
+        root["stale"] = !s.valid;
         root["fsm"] = s.fsm;
         root["fsmName"] = QN8027::fsmName(s.fsm);
         root["audioPeak"] = s.audioPeak;

@@ -54,6 +54,10 @@ public:
         bool muted = false;
         bool matchOk = false;
         float channel = 0;
+        // False when the status register did not read back. The other fields
+        // are then stale rather than wrong, which is the trade an observer
+        // read makes in exchange for never resetting the bus.
+        bool valid = false;
     };
     RadioSnapshot snapshot();
     static const char* fsmName(uint8_t fsm);
@@ -90,6 +94,7 @@ private:
     void write1Byte(uint8_t regAddr, uint8_t data);
     uint8_t read1Byte(uint8_t regAddr);
     uint8_t read1ByteOptional(uint8_t regAddr);
+    bool refreshStatus();
     void updateSYSTEM_REG();
     void waitForRDSSend();
     void sendRDS(uint8_t by0, uint8_t by1, uint8_t by2, uint8_t by3, uint8_t by4, uint8_t by5, uint8_t by6, uint8_t by7);

@@ -29,6 +29,9 @@ constexpr uint8_t REG_RDSD7  = 0x0F; // RDS data byte 7
 constexpr uint8_t REG_PAC    = 0x10; // PA output power target control
 constexpr uint8_t REG_FDEV   = 0x11; // TX frequency deviation control
 constexpr uint8_t REG_RDS    = 0x12; // RDS deviation/mode
+// These two frequently NACK while the PA is down, which is a normal state and
+// not a bus fault. Always read them with read1ByteOptional so a NACK cannot
+// trigger a USB reset.
 constexpr uint8_t REG_ANT    = 0x1E; // Antenna tuning control
 constexpr uint8_t REG_PACAP  = 0x30; // PA capacitor auto-tune result
 
@@ -117,6 +120,11 @@ uint8_t QN8027::read1Byte(uint8_t regAddr) {
     return 0xFF;
 }
 
+// Read for observers - status polling, logging, anything whose only job is to
+// report what the chip currently says. A failed read here returns 0xFF and
+// nothing else happens: no USB reset, no closed handle. Resetting the bridge
+// on behalf of a read whose result is merely displayed costs a full re-init
+// and a carrier drop, which is a far worse outcome than one stale field.
 uint8_t QN8027::read1ByteOptional(uint8_t regAddr) {
     if (i2c) {
         return i2c->readByteData(regAddr);
@@ -124,6 +132,19 @@ uint8_t QN8027::read1ByteOptional(uint8_t regAddr) {
         return cp2112->readByteData(regAddr, false);
     }
     return 0xFF;
+}
+
+// Refresh the cached status register without letting a bad read poison it.
+// statusReg is the baseline waitForRDSSend() compares against, so storing a
+// failed 0xFF would make the next RDS send believe the toggle already
+// happened. Returns false if the read did not come back.
+bool QN8027::refreshStatus() {
+    uint8_t b = read1ByteOptional(REG_STATUS);
+    if (b == 0xFF) {
+        return false;
+    }
+    statusReg.byte = b;
+    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -290,7 +311,7 @@ void QN8027::calibrate() {
 }
 
 bool QN8027::antennaMatchOk() {
-    uint8_t pacap = read1Byte(REG_PACAP);
+    uint8_t pacap = read1ByteOptional(REG_PACAP);
     // Quintic: PACAP 0x00-0x1F means the matching network covers this channel.
     return pacap != 0xFF && pacap <= 0x1F;
 }
@@ -309,8 +330,8 @@ bool QN8027::retuneAntenna(int retries) {
             updateSYSTEM_REG();
             waitForCalComplete(500);
         }
-        uint8_t pacap = read1Byte(REG_PACAP);
-        uint8_t ant = read1Byte(REG_ANT);
+        uint8_t pacap = read1ByteOptional(REG_PACAP);
+        uint8_t ant = read1ByteOptional(REG_ANT);
         ok = (pacap != 0xFF && pacap <= 0x1F);
         LogInfo(VB_PLUGIN, "KFMT: antenna retune attempt %d/%d PACAP=%02X ANT=%02X %s\n",
                 i + 1, retries, pacap, ant, ok ? "ok" : "out of range");
@@ -322,11 +343,13 @@ bool QN8027::retuneAntenna(int retries) {
 }
 
 QN8027::RadioSnapshot QN8027::snapshot() {
+    // Every read below is an observer read. A status poll must never be able
+    // to reset the USB bridge: that tears the transmitter down and re-inits
+    // it, which is ~150 ms of dead carrier to service a page refresh.
     RadioSnapshot s;
-    statusReg.byte = read1Byte(REG_STATUS);
+    s.valid = refreshStatus();
     s.fsm = statusReg.fields.fsm;
     s.audioPeak = statusReg.fields.audioPeak;
-    // 0x1E/0x30 are not always ACK'd when the PA is down; do not reset USB.
     s.ant = read1ByteOptional(REG_ANT);
     s.pacap = read1ByteOptional(REG_PACAP);
     s.pac = pacReg.fields.paTarget;
@@ -393,8 +416,9 @@ void QN8027::setChannel(float frequency) {
 }
 
 float QN8027::getChannel() {
-    uint8_t frequencyH = read1Byte(REG_SYSTEM) & 0x03;
-    uint8_t frequencyL = read1Byte(REG_CH1);
+    // Observer-only: both callers just report the value.
+    uint8_t frequencyH = read1ByteOptional(REG_SYSTEM) & 0x03;
+    uint8_t frequencyL = read1ByteOptional(REG_CH1);
     float freqCombine = (float)(((frequencyH << 8) | frequencyL) * 5 + 7600) / 100;
     return freqCombine;
 }
@@ -518,7 +542,7 @@ void QN8027::setTxPower(uint8_t setX) {
 // ---------------------------------------------------------------------------
 
 void QN8027::printInfo() {
-    statusReg.byte = read1Byte(REG_STATUS);
+    refreshStatus();
 
     LogInfo(VB_PLUGIN, "Status: %02X   \n", statusReg.byte);
     LogInfo(VB_PLUGIN, "  Channel: %0.2f MHz\n", getChannel());
@@ -528,8 +552,8 @@ void QN8027::printInfo() {
             gpltReg.byte, gpltReg.fields.PAAutoOffTime == 3 ? "never" : "timed");
     LogInfo(VB_PLUGIN, "  PAC: %u  (~%0.1f dBuV)\n",
             pacReg.fields.paTarget, 0.62f * pacReg.fields.paTarget + 71.0f);
-    uint8_t pacap = read1Byte(REG_PACAP);
-    uint8_t ant = read1Byte(REG_ANT);
+    uint8_t pacap = read1ByteOptional(REG_PACAP);
+    uint8_t ant = read1ByteOptional(REG_ANT);
     LogInfo(VB_PLUGIN, "  PACAP: %02X  ANT: %02X  match: %s\n",
             pacap, ant, (pacap != 0xFF && pacap <= 0x1F) ? "ok" : "out of range");
     LogInfo(VB_PLUGIN, "  RDS Sent Status: %d\n", statusReg.fields.rdsSentStatus);

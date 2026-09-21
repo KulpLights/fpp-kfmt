@@ -27,7 +27,7 @@ PrintSettingGroup("KFMTRDSSettings", "", "", 1, "fpp-kfmt");
   <div id="kfmtPsMeta"></div>
 </div>
 <h2>Transmitter Status</h2>
-<p class="text-body">Match is judged from the QN8027 PACAP register (0x00–0x1F is in range). Retune after moving the antenna or enclosure. During a show, leave the policy on Manual only and do not press Retune unless you mean to.</p>
+<p class="text-body">Antenna Tuning shows the QN8027's antenna tuning register. The chip gives no readable measure of how good the match is, so judge it with a receiver. Retune re-runs the chip's calibration - do that after moving the antenna or its enclosure, and not during a show.</p>
 <div class="mb-3">
   <button type="button" class="buttons btn-success" id="kfmtRetuneBtn" onclick="kfmtRetune();">Retune Antenna</button>
   <button type="button" class="buttons" id="kfmtClearPeakBtn" onclick="kfmtClearPeak();">Clear Audio Peak</button>
@@ -40,8 +40,7 @@ PrintSettingGroup("KFMTRDSSettings", "", "", 1, "fpp-kfmt");
     <tr><th scope="row">Channel</th><td id="kfmtChannel">—</td></tr>
     <tr><th scope="row">FSM</th><td id="kfmtFsm">—</td></tr>
     <tr><th scope="row">Carrier</th><td id="kfmtCarrier">—</td></tr>
-    <tr><th scope="row">Antenna match</th><td id="kfmtMatch">—</td></tr>
-    <tr><th scope="row">PACAP / ANT</th><td id="kfmtPacap">—</td></tr>
+    <tr><th scope="row">Antenna Tuning</th><td id="kfmtAnt">—</td></tr>
     <tr><th scope="row">Audio peak</th><td id="kfmtPeak">—</td></tr>
     <tr><th scope="row">Last retune</th><td id="kfmtLastRetune">—</td></tr>
   </tbody>
@@ -70,8 +69,7 @@ function kfmtRefreshStatus() {
                 kfmtSetText('kfmtFsm', s.fsmName || 'Disconnected', true);
                 kfmtSetText('kfmtChannel', '—', false);
                 kfmtSetText('kfmtCarrier', '—', false);
-                kfmtSetText('kfmtMatch', '—', false);
-                kfmtSetText('kfmtPacap', '—', false);
+                kfmtSetText('kfmtAnt', '—', false);
                 kfmtSetText('kfmtPeak', '—', false);
                 return;
             }
@@ -80,8 +78,7 @@ function kfmtRefreshStatus() {
                 kfmtSetText('kfmtFsm', s.fsmName || 'Reconnecting', true);
                 kfmtSetText('kfmtChannel', '—', false);
                 kfmtSetText('kfmtCarrier', '—', false);
-                kfmtSetText('kfmtMatch', '—', false);
-                kfmtSetText('kfmtPacap', '—', false);
+                kfmtSetText('kfmtAnt', '—', false);
                 kfmtSetText('kfmtPeak', '—', false);
                 return;
             }
@@ -89,10 +86,8 @@ function kfmtRefreshStatus() {
             kfmtSetText('kfmtFsm', s.fsmName || ('FSM ' + s.fsm), false);
             var carrier = s.transmitting ? (s.muted ? 'on (muted)' : 'on') : 'off';
             kfmtSetText('kfmtCarrier', carrier, !s.transmitting);
-            var match = s.matchOk ? 'OK' : 'out of range';
             if (s.antRail) match += ' (ANT at rail)';
-            kfmtSetText('kfmtMatch', match, !s.matchOk || s.antRail);
-            kfmtSetText('kfmtPacap', 'PACAP 0x' + s.pacapHex + ' / ANT 0x' + s.antHex, !s.matchOk);
+            kfmtSetText('kfmtAnt', '0x' + s.antHex, s.antRail);
             var peak = String(s.audioPeak) + ' / 15 (max-hold)';
             if (s.audioClip) peak += ' — clipping since last clear';
             kfmtSetText('kfmtPeak', peak, s.audioClip);
@@ -112,7 +107,7 @@ function kfmtRetune() {
         method: 'POST',
         dataType: 'json'
     }).done(function (s) {
-        msg.textContent = s.ok ? 'Match OK' : 'Match out of range — try antenna position and retune again';
+        msg.textContent = 'Retuned — check the signal on a receiver';
         kfmtRefreshStatus();
     }).fail(function () {
         msg.textContent = 'Retune failed';

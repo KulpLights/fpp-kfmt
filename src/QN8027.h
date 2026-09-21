@@ -40,19 +40,18 @@ public:
     void setPreemphasis(bool us);
     void setChannel(float freq);
 
-    // Recalibrate the PA / antenna match. Returns true if PACAP is in range.
-    bool retuneAntenna(int retries = 3);
-    bool antennaMatchOk();
+    // Re-run the chip's adaptive antenna tuning. There is no way to read back
+    // whether the result is a good match - see the note in retuneAntenna() -
+    // so this reports only that the calibration was carried out.
+    void retuneAntenna();
 
     struct RadioSnapshot {
         uint8_t fsm = 0;
         uint8_t audioPeak = 0;
         uint8_t ant = 0;
-        uint8_t pacap = 0;
         uint8_t pac = 0;
         bool transmitting = false;
         bool muted = false;
-        bool matchOk = false;
         float channel = 0;
         // False when the status register did not read back. The other fields
         // are then stale rather than wrong, which is the trade an observer

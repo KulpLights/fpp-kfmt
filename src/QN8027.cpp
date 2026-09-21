@@ -29,11 +29,12 @@ constexpr uint8_t REG_RDSD7  = 0x0F; // RDS data byte 7
 constexpr uint8_t REG_PAC    = 0x10; // PA output power target control
 constexpr uint8_t REG_FDEV   = 0x11; // TX frequency deviation control
 constexpr uint8_t REG_RDS    = 0x12; // RDS deviation/mode
-// These two frequently NACK while the PA is down, which is a normal state and
-// not a bus fault. Always read them with read1ByteOptional so a NACK cannot
-// trigger a USB reset.
+// ANT frequently NACKs while the PA is down, which is a normal state and not a
+// bus fault, so always read it with read1ByteOptional - a NACK must not trigger
+// a USB reset. It is the last register this part has: the datasheet's register
+// summary runs 00h-12h, and 1Eh is the one undocumented register the vendor
+// reference driver also uses.
 constexpr uint8_t REG_ANT    = 0x1E; // Antenna tuning control
-constexpr uint8_t REG_PACAP  = 0x30; // PA capacitor auto-tune result
 
 // ---------------------------------------------------------------------------
 // FSM Mapping
@@ -310,36 +311,26 @@ void QN8027::calibrate() {
     waitForCalComplete(500);
 }
 
-bool QN8027::antennaMatchOk() {
-    uint8_t pacap = read1ByteOptional(REG_PACAP);
-    // Quintic: PACAP 0x00-0x1F means the matching network covers this channel.
-    return pacap != 0xFF && pacap <= 0x1F;
-}
-
-bool QN8027::retuneAntenna(int retries) {
-    if (retries < 1) {
-        retries = 1;
-    }
+// There is no readable "is the match good" answer on this part. A register at
+// 0x30 was previously read as a PA-capacitor result and compared against a
+// range; that register does not exist. The datasheet's register summary ends
+// at 12h, the vendor reference driver (PixelRadio's QN8027Radio) defines
+// nothing above 1Eh, and on hardware 0x30 reads 0x00 permanently - which made
+// the old check pass unconditionally, so a "match ok" was reported even with
+// no antenna, and the retry loop always stopped after one attempt.
+//
+// So just run the calibration and report the antenna register for the log.
+// Judging the result is left to the operator with a receiver.
+void QN8027::retuneAntenna() {
     const bool wantTx = systemReg.fields.radioStatus != 0;
-    bool ok = false;
-    for (int i = 0; i < retries; i++) {
-        calibrate();
-        if (wantTx) {
-            systemReg.fields.muteAudio = 0;
-            systemReg.fields.radioStatus = 1;
-            updateSYSTEM_REG();
-            waitForCalComplete(500);
-        }
-        uint8_t pacap = read1ByteOptional(REG_PACAP);
-        uint8_t ant = read1ByteOptional(REG_ANT);
-        ok = (pacap != 0xFF && pacap <= 0x1F);
-        LogInfo(VB_PLUGIN, "KFMT: antenna retune attempt %d/%d PACAP=%02X ANT=%02X %s\n",
-                i + 1, retries, pacap, ant, ok ? "ok" : "out of range");
-        if (ok) {
-            break;
-        }
+    calibrate();
+    if (wantTx) {
+        systemReg.fields.muteAudio = 0;
+        systemReg.fields.radioStatus = 1;
+        updateSYSTEM_REG();
+        waitForCalComplete(500);
     }
-    return ok;
+    LogInfo(VB_PLUGIN, "KFMT: antenna retuned, ANT=%02X\n", read1ByteOptional(REG_ANT));
 }
 
 QN8027::RadioSnapshot QN8027::snapshot() {
@@ -351,11 +342,9 @@ QN8027::RadioSnapshot QN8027::snapshot() {
     s.fsm = statusReg.fields.fsm;
     s.audioPeak = statusReg.fields.audioPeak;
     s.ant = read1ByteOptional(REG_ANT);
-    s.pacap = read1ByteOptional(REG_PACAP);
     s.pac = pacReg.fields.paTarget;
     s.transmitting = systemReg.fields.radioStatus != 0;
     s.muted = systemReg.fields.muteAudio != 0;
-    s.matchOk = (s.pacap != 0xFF && s.pacap <= 0x1F);
     s.channel = getChannel();
     return s;
 }
@@ -552,10 +541,7 @@ void QN8027::printInfo() {
             gpltReg.byte, gpltReg.fields.PAAutoOffTime == 3 ? "never" : "timed");
     LogInfo(VB_PLUGIN, "  PAC: %u  (~%0.1f dBuV)\n",
             pacReg.fields.paTarget, 0.62f * pacReg.fields.paTarget + 71.0f);
-    uint8_t pacap = read1ByteOptional(REG_PACAP);
-    uint8_t ant = read1ByteOptional(REG_ANT);
-    LogInfo(VB_PLUGIN, "  PACAP: %02X  ANT: %02X  match: %s\n",
-            pacap, ant, (pacap != 0xFF && pacap <= 0x1F) ? "ok" : "out of range");
+    LogInfo(VB_PLUGIN, "  ANT: %02X\n", read1ByteOptional(REG_ANT));
     LogInfo(VB_PLUGIN, "  RDS Sent Status: %d\n", statusReg.fields.rdsSentStatus);
 }
 

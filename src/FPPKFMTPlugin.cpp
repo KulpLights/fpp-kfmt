@@ -231,8 +231,6 @@ public:
             return;
         } else if (key == "StationIDTime") {
             stationIdCycleTime = safeStoi(settings["StationIDTime"], 5, "StationIDTime");
-        } else if (key == "AntennaRetunePolicy") {
-            return;
         } else if (key == "Frequency") {
             // Channel change retunes the antenna; a full bring-up is required.
             queueRadioWork([this]() { initializeQN8027(); });
@@ -365,10 +363,6 @@ public:
             // the saved frequency again now that TX is up.
             qn8027.setChannel(ffreq);
             carrierEnabled = true;
-            if (settings["AntennaRetunePolicy"] == "1" && !qn8027.antennaMatchOk()) {
-                lastRetuneOk = qn8027.retuneAntenna(3);
-                lastRetuneResult = lastRetuneOk ? "ok" : "out of range";
-            }
             qn8027.printInfo();
         } catch (const std::exception &e) {
             LogErr(VB_PLUGIN, "KFMT: initializeQN8027() exception: %s\n", e.what());
@@ -544,17 +538,12 @@ public:
         root["fsmName"] = QN8027::fsmName(s.fsm);
         root["audioPeak"] = s.audioPeak;
         root["ant"] = s.ant;
-        root["pacap"] = s.pacap;
         char antHex[8];
-        char pacapHex[8];
         snprintf(antHex, sizeof(antHex), "%02X", s.ant);
-        snprintf(pacapHex, sizeof(pacapHex), "%02X", s.pacap);
         root["antHex"] = antHex;
-        root["pacapHex"] = pacapHex;
         root["pac"] = s.pac;
         root["transmitting"] = s.transmitting;
         root["muted"] = s.muted;
-        root["matchOk"] = s.matchOk;
         root["channel"] = s.channel;
         root["antRail"] = (s.ant == 0x3F);
         root["audioClip"] = (s.audioPeak >= 15);
@@ -615,9 +604,10 @@ public:
             // two chances to time out, and the status read only made sense
             // right after the retune anyway.
             auto job = runOnRadioThread([this](RadioJob &j) {
-                j.ok = qn8027.retuneAntenna(3);
-                lastRetuneOk = j.ok;
-                lastRetuneResult = j.ok ? "ok" : "out of range";
+                qn8027.retuneAntenna();
+                j.ok = true;
+                lastRetuneOk = true;
+                lastRetuneResult = "done";
                 const bool wantCarrier =
                     playlistActive || settings["IdleAction"] != "2";
                 if (wantCarrier) {
@@ -957,7 +947,6 @@ public:
         setIfNotFound("TXDigitalGain", "0");
         setIfNotFound("InputImpedance", "20");
         setIfNotFound("TransmitPower", "50");
-        setIfNotFound("AntennaRetunePolicy", "0");
 
         setIfNotFound("TXFreqDeviation", "129");
         setIfNotFound("RDSFreqDeviation", "10");

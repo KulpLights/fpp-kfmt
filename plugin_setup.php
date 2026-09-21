@@ -70,7 +70,7 @@ function kfmtRefreshStatus() {
             }
             kfmtSetText('kfmtAdapter', 'Connected', false);
             if (!s.detected) {
-                kfmtSetText('kfmtFsm', s.fsmName || 'Needs FPPD restart', true);
+                kfmtSetText('kfmtFsm', s.fsmName || 'Reconnecting', true);
                 kfmtSetText('kfmtChannel', '—', false);
                 kfmtSetText('kfmtCarrier', '—', false);
                 kfmtSetText('kfmtMatch', '—', false);

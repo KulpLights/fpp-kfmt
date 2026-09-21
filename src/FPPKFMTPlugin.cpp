@@ -428,15 +428,25 @@ public:
 
     static constexpr const char *kDisconnectWarning = "K-FMT USB adapter disconnected.";
     static constexpr const char *kReconnectRestartWarning =
-        "K-FMT USB adapter is connected but the transmitter did not resume. Restart FPPD.";
-    static constexpr int kMaxReconnectTries = 6;
+        "K-FMT USB adapter is connected but the transmitter is not responding.";
+    // Retry forever, just not at full speed. A show controller is usually
+    // unattended, so giving up permanently means the radio stays dark until
+    // someone notices and restarts FPPD - whereas whatever is wrong (a brown-
+    // out, a hub renumbering, a chip that needs a moment) may well clear on
+    // its own. Warn after a few failures so the UI says something, then keep
+    // trying on a slower cadence.
+    static constexpr int kReconnectWarnAfter = 6;
+    static constexpr uint64_t kReconnectFastMs = 5000;
+    static constexpr uint64_t kReconnectSlowMs = 60000;
     uint64_t nextReconnectTry = 0;
     int reconnectFails = 0;
 
+    uint64_t reconnectInterval() const {
+        return reconnectFails < kReconnectWarnAfter ? kReconnectFastMs
+                                                    : kReconnectSlowMs;
+    }
+
     bool attemptReconnect() {
-        if (reconnectFails >= kMaxReconnectTries) {
-            return false;
-        }
         if (!qn8027.adapterPresent()) {
             return false;
         }
@@ -446,11 +456,11 @@ public:
             return true;
         }
         reconnectFails++;
-        LogErr(VB_PLUGIN, "KFMT: reconnect attempt %d/%d failed\n",
-               reconnectFails, kMaxReconnectTries);
-        if (reconnectFails >= kMaxReconnectTries) {
+        LogErr(VB_PLUGIN, "KFMT: reconnect attempt %d failed, retrying in %llus\n",
+               reconnectFails, (unsigned long long)(reconnectInterval() / 1000));
+        if (reconnectFails == kReconnectWarnAfter) {
             WarningHolder::AddWarning(kReconnectRestartWarning);
-            LogErr(VB_PLUGIN, "KFMT: giving up reconnect until adapter is unplugged or FPPD restarts\n");
+            LogErr(VB_PLUGIN, "KFMT: backing off to a slow reconnect retry\n");
         }
         return false;
     }
@@ -499,13 +509,6 @@ public:
             return root;
         }
 
-        if (reconnectFails >= kMaxReconnectTries && !detected) {
-            root["detected"] = false;
-            root["link"] = "adapter connected, transmitter not running";
-            root["fsmName"] = "Needs FPPD restart";
-            return root;
-        }
-
         // Deliberately no detect() here. Polling it proved liveness the
         // expensive way: it reads the CID registers through the resetting
         // read, so one transient HID hiccup closed the bus, reported the chip
@@ -526,8 +529,9 @@ public:
 
         root["detected"] = detected;
         if (!detected) {
-            root["link"] = "adapter connected, transmitter not running";
-            root["fsmName"] = "Needs FPPD restart";
+            root["link"] = "adapter connected, transmitter not responding, retrying";
+            root["fsmName"] = "Reconnecting";
+            root["reconnectFails"] = reconnectFails;
             return root;
         }
 
@@ -659,9 +663,8 @@ public:
         while (running) {
             uint64_t ct = GetTimeMS();
 
-            if (!detected && reconnectFails < kMaxReconnectTries &&
-                    ct > nextReconnectTry) {
-                nextReconnectTry = ct + 5000;
+            if (!detected && ct > nextReconnectTry) {
+                nextReconnectTry = ct + reconnectInterval();
                 lk.unlock();
                 attemptReconnect();
                 lk.lock();

@@ -75,10 +75,15 @@ public:
     std::string lastRetuneResult = "none";
     bool        lastRetuneOk = false;
 
-    struct RadioWaitState {
+    // Everything a queued radio job touches on the caller's behalf. Both the
+    // waiter and the radio thread hold a shared_ptr to it, so the job stays
+    // valid even if the waiter has already given up and returned.
+    struct RadioJob {
         std::mutex mutex;
         std::condition_variable cv;
         bool done = false;
+        Json::Value result;
+        bool ok = false;
     };
 
     std::vector<std::string> stationIdStrings;
@@ -259,31 +264,47 @@ public:
         condition.notify_all();
     }
 
-    // Run I2C work on the sender thread and wait. HTTP handlers must not talk
-    // to the chip themselves — that races the RDS loop.
-    // Completion state lives on the heap so a wait timeout cannot free the
-    // stack while the radio thread is still finishing the job (that UAF
-    // SIGSEGV'd fppd after Disable Carrier).
-    bool runOnRadioThread(const std::function<void()> &fn, int timeoutMs) {
+    // Run I2C work on the sender thread and wait for it. HTTP handlers must not
+    // talk to the chip themselves — that races the RDS loop.
+    //
+    // A timeout here does NOT cancel the job: it stays queued and the radio
+    // thread runs it later, after this call has returned. So the job must not
+    // reach anything owned by the caller's frame. That is why it writes its
+    // output into the RadioJob it is handed rather than into a captured local,
+    // and why `fn` must capture only `this` — never `[&]`. Getting this wrong
+    // is what SIGSEGV'd fppd after Disable Carrier.
+    //
+    // Returns the job on success, or nullptr if it did not finish in time.
+    std::shared_ptr<RadioJob> runOnRadioThread(
+            const std::function<void(RadioJob &)> &fn, int timeoutMs) {
         if (!detected || !running) {
-            return false;
+            return nullptr;
         }
-        auto state = std::make_shared<RadioWaitState>();
+        auto job = std::make_shared<RadioJob>();
         {
             std::lock_guard<std::mutex> lk(lock);
-            functions.emplace([fn, state]() {
-                fn();
-                {
-                    std::lock_guard<std::mutex> g(state->mutex);
-                    state->done = true;
+            functions.emplace([fn, job]() {
+                try {
+                    fn(*job);
+                } catch (const std::exception &e) {
+                    LogErr(VB_PLUGIN, "KFMT: exception in radio job: %s\n", e.what());
+                } catch (...) {
+                    LogErr(VB_PLUGIN, "KFMT: unknown exception in radio job\n");
                 }
-                state->cv.notify_one();
+                {
+                    std::lock_guard<std::mutex> g(job->mutex);
+                    job->done = true;
+                }
+                job->cv.notify_one();
             });
         }
         condition.notify_all();
-        std::unique_lock<std::mutex> ul(state->mutex);
-        return state->cv.wait_for(ul, std::chrono::milliseconds(timeoutMs),
-                                  [state]() { return state->done; });
+        std::unique_lock<std::mutex> ul(job->mutex);
+        if (!job->cv.wait_for(ul, std::chrono::milliseconds(timeoutMs),
+                              [&job]() { return job->done; })) {
+            return nullptr;
+        }
+        return job;
     }
 
     void initializeQN8027() {
@@ -549,19 +570,19 @@ public:
                 callback(makeStringResponse(root.toStyledString(), 503, "application/json"));
                 return;
             }
-            bool finished = runOnRadioThread([&]() {
+            auto job = runOnRadioThread([this](RadioJob &j) {
                 qn8027.clearAudioPeak();
                 std::this_thread::sleep_for(std::chrono::milliseconds(20));
-                root = statusJson();
-                root["ok"] = true;
+                j.result = statusJson();
+                j.result["ok"] = true;
             }, 2000);
-            if (!finished) {
+            if (!job) {
                 root["ok"] = false;
                 root["error"] = "timeout";
                 callback(makeStringResponse(root.toStyledString(), 504, "application/json"));
                 return;
             }
-            callback(makeStringResponse(root.toStyledString(), 200, "application/json"));
+            callback(makeStringResponse(job->result.toStyledString(), 200, "application/json"));
             return;
         }
 
@@ -572,11 +593,13 @@ public:
                 callback(makeStringResponse(root.toStyledString(), 503, "application/json"));
                 return;
             }
-            bool ok = false;
-            bool finished = runOnRadioThread([&]() {
-                ok = qn8027.retuneAntenna(3);
-                lastRetuneOk = ok;
-                lastRetuneResult = ok ? "ok" : "out of range";
+            // Retune and read the resulting status in one job: two waits meant
+            // two chances to time out, and the status read only made sense
+            // right after the retune anyway.
+            auto job = runOnRadioThread([this](RadioJob &j) {
+                j.ok = qn8027.retuneAntenna(3);
+                lastRetuneOk = j.ok;
+                lastRetuneResult = j.ok ? "ok" : "out of range";
                 const bool wantCarrier =
                     playlistActive || settings["IdleAction"] != "2";
                 if (wantCarrier) {
@@ -589,25 +612,21 @@ public:
                     qn8027.stopTransmit();
                     carrierEnabled = false;
                 }
+                j.result = statusJson();
+                j.result["ok"] = j.ok;
             }, 8000);
-            if (!finished) {
+            if (!job) {
                 root["ok"] = false;
                 root["error"] = "timeout";
                 callback(makeStringResponse(root.toStyledString(), 504, "application/json"));
                 return;
             }
-            finished = runOnRadioThread([&]() { root = statusJson(); }, 2000);
-            if (!finished) {
-                root["ok"] = ok;
-            } else {
-                root["ok"] = ok;
-            }
-            callback(makeStringResponse(root.toStyledString(), 200, "application/json"));
+            callback(makeStringResponse(job->result.toStyledString(), 200, "application/json"));
             return;
         }
 
-        bool finished = runOnRadioThread([&]() { root = statusJson(); }, 4000);
-        if (!finished) {
+        auto job = runOnRadioThread([this](RadioJob &j) { j.result = statusJson(); }, 4000);
+        if (!job) {
             const bool adapter = qn8027.adapterPresent();
             root["detected"] = false;
             root["adapterPresent"] = adapter;
@@ -617,7 +636,7 @@ public:
             callback(makeStringResponse(root.toStyledString(), 200, "application/json"));
             return;
         }
-        callback(makeStringResponse(root.toStyledString(), 200, "application/json"));
+        callback(makeStringResponse(job->result.toStyledString(), 200, "application/json"));
     }
 
     void run() {

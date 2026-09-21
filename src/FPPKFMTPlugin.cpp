@@ -92,6 +92,13 @@ public:
     uint64_t  nextPSTime         = 0;  // when to send the next PS packet (~400 ms)
     uint64_t  nextRDSTime        = 0;  // when to send the next RT/RT+ sequence
 
+    // After Hours Music Player streams over mpd while FPP is idle. Polling its
+    // track title lets the RDS text follow the stream instead of sitting on
+    // the static station text between playlists.
+    bool      mpcAvailable   = false;
+    uint64_t  nextMpcPoll    = 0;
+    std::string mpcTitle;
+
     std::string title;
     std::string artist;
     std::string album;
@@ -109,6 +116,9 @@ public:
             setDefaultSettings();
 
             stationIdCycleTime = safeStoi(settings["StationIDTime"], 5, "StationIDTime");
+
+            mpcAvailable = FileExists("/usr/bin/mpc") || FileExists("/bin/mpc") ||
+                           FileExists("/usr/local/bin/mpc");
 
             detected = qn8027.detect();
             if (!detected) {
@@ -231,6 +241,15 @@ public:
             return;
         } else if (key == "StationIDTime") {
             stationIdCycleTime = safeStoi(settings["StationIDTime"], 5, "StationIDTime");
+        } else if (key == "AfterHoursRDS") {
+            // Read at point of use; turning it off should also drop the title
+            // it was showing rather than leaving the last stream track up.
+            if (settings["AfterHoursRDS"] == "0" && !mpcTitle.empty()) {
+                mpcTitle.clear();
+                title.clear();
+                formatAndSendText(settings["StationID"], 0);
+                nextRDSTime = 0;
+            }
         } else if (key == "Frequency") {
             // Channel change retunes the antenna; a full bring-up is required.
             queueRadioWork([this]() { initializeQN8027(); });
@@ -660,6 +679,33 @@ public:
                 lk.lock();
             }
 
+            // While nothing is playing, follow the After Hours stream's title.
+            // Only when idle: a running playlist's own media data is better.
+            if (afterHoursEnabled() && !playlistActive && detected &&
+                    ct > nextMpcPoll) {
+                nextMpcPoll = ct + 12000;
+                // Everything here runs with the queue lock released:
+                // readMpcTitle() runs a subprocess, and formatAndSendText()
+                // takes that same non-recursive lock itself, so calling it
+                // while holding it deadlocks this thread - which stops RDS,
+                // the status API and the reconnect poll dead.
+                lk.unlock();
+                std::string t = readMpcTitle();
+                bool changed = (t != mpcTitle);
+                if (changed) {
+                    mpcTitle = t;
+                    title = t;
+                    artist.clear();
+                    album.clear();
+                    LogInfo(VB_PLUGIN, "KFMT: After Hours title \"%s\"\n", t.c_str());
+                    formatAndSendText(settings["StationID"], 0);
+                }
+                lk.lock();
+                if (changed) {
+                    nextRDSTime = 0;   // refresh RT/RT+ now rather than in 2s
+                }
+            }
+
             // Advance to the next PS fragment every stationIdCycleTime seconds.
             // curStationIdString starts at -1 so the first advance sets it to 0.
             if (ct > nextStationTime && !stationIdStrings.empty()) {
@@ -867,6 +913,7 @@ public:
         // running playlist (or advancing items) sends "playing".
         if (action == "start" || action == "playing") {
             playlistActive = true;
+            mpcTitle.clear();   // the playlist's own media data takes over
             startAction();
         } else if (action == "stop") {
             playlistActive = false;
@@ -930,6 +977,32 @@ public:
         condition.notify_all();
     }
 
+    bool afterHoursEnabled() const {
+        auto it = settings.find("AfterHoursRDS");
+        return mpcAvailable && it != settings.end() && it->second != "0";
+    }
+
+    // Ask mpd what it is playing. Runs on the sender thread with the queue
+    // lock released - it is a subprocess, and must not be holding anything
+    // the callbacks need.
+    static std::string readMpcTitle() {
+        std::string out;
+        FILE *f = popen("mpc current -f %title% 2>/dev/null", "r");
+        if (f == nullptr) {
+            return out;
+        }
+        char buf[256];
+        if (fgets(buf, sizeof(buf), f) != nullptr) {
+            out = buf;
+        }
+        pclose(f);
+        while (!out.empty() &&
+               (out.back() == '\n' || out.back() == '\r' || out.back() == ' ')) {
+            out.pop_back();
+        }
+        return out;
+    }
+
     void setDefaultSettings() {
         setIfNotFound("Frequency", "87.9");
         setIfNotFound("IdleAction", "0");
@@ -947,6 +1020,7 @@ public:
         setIfNotFound("TXDigitalGain", "0");
         setIfNotFound("InputImpedance", "20");
         setIfNotFound("TransmitPower", "50");
+        setIfNotFound("AfterHoursRDS", "0");
 
         setIfNotFound("TXFreqDeviation", "129");
         setIfNotFound("RDSFreqDeviation", "10");

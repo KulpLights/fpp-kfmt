@@ -21,7 +21,8 @@
                 "StationID",
                 "StationIDTime",
                 "StationName",
-                "StationURL"
+                "StationURL",
+                "AfterHoursRDS"
             ]
         }
     },
@@ -223,6 +224,24 @@
                 "28 - --- / Folk": 28,
                 "29 - Weather / Documentary": 29
             }
+        },
+        "AfterHoursRDS": {
+            "name": "AfterHoursRDS",
+            "description": "After Hours Track Info",
+            "tip": "When no playlist is running, take the track title from the After Hours Music Player's stream and send it as RDS text, instead of the static station text. Only appears when that plugin's mpc command is installed.",
+            "restart": 0,
+            "reboot": 0,
+            "type": "select",
+            "default": 0,
+            "options": {
+                "On": 1,
+                "Off": 0
+            },
+            "checkFile": [
+                "/usr/bin/mpc",
+                "/bin/mpc",
+                "/usr/local/bin/mpc"
+            ]
         }
     }
 }

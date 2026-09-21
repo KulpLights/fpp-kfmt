@@ -54,9 +54,12 @@ function kfmtSetText(id, text, warn) {
     el.textContent = text;
     el.classList.toggle('text-danger', !!warn);
 }
+// URLs here are relative on purpose. An absolute "/api/..." loses the prefix
+// when the page is reached through FPP's proxy or loaded by FPPMon, and the
+// request goes to the wrong host.
 function kfmtRefreshStatus() {
     $.ajax({
-        url: '/api/plugin-apis/kfmt',
+        url: 'api/plugin-apis/kfmt',
         method: 'GET',
         dataType: 'json',
         cache: false
@@ -105,7 +108,7 @@ function kfmtRetune() {
     btn.disabled = true;
     msg.textContent = 'Retuning…';
     $.ajax({
-        url: '/api/plugin-apis/kfmt/retune',
+        url: 'api/plugin-apis/kfmt/retune',
         method: 'POST',
         dataType: 'json'
     }).done(function (s) {
@@ -121,7 +124,7 @@ function kfmtClearPeak() {
     var btn = document.getElementById('kfmtClearPeakBtn');
     btn.disabled = true;
     $.ajax({
-        url: '/api/plugin-apis/kfmt/clearpeak',
+        url: 'api/plugin-apis/kfmt/clearpeak',
         method: 'POST',
         dataType: 'json'
     }).done(function () {

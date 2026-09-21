@@ -98,6 +98,7 @@ public:
     bool      mpcAvailable   = false;
     uint64_t  nextMpcPoll    = 0;
     std::string mpcTitle;
+    std::string mpcArtist;
 
     std::string title;
     std::string artist;
@@ -246,7 +247,9 @@ public:
             // it was showing rather than leaving the last stream track up.
             if (settings["AfterHoursRDS"] == "0" && !mpcTitle.empty()) {
                 mpcTitle.clear();
+                mpcArtist.clear();
                 title.clear();
+                artist.clear();
                 formatAndSendText(settings["StationID"], 0);
                 nextRDSTime = 0;
             }
@@ -690,14 +693,20 @@ public:
                 // while holding it deadlocks this thread - which stops RDS,
                 // the status API and the reconnect poll dead.
                 lk.unlock();
-                std::string t = readMpcTitle();
-                bool changed = (t != mpcTitle);
+                std::string t = readMpcField("%title%");
+                // Streams usually carry only a title, and often put
+                // "Artist - Title" in it, so artist is frequently empty -
+                // ask anyway, and let RT+ tag it properly when it is there.
+                std::string a = readMpcField("[%artist%|%performer%|%albumartist%]");
+                bool changed = (t != mpcTitle || a != mpcArtist);
                 if (changed) {
                     mpcTitle = t;
+                    mpcArtist = a;
                     title = t;
-                    artist.clear();
+                    artist = a;
                     album.clear();
-                    LogInfo(VB_PLUGIN, "KFMT: After Hours title \"%s\"\n", t.c_str());
+                    LogInfo(VB_PLUGIN, "KFMT: After Hours \"%s\"%s%s\n", t.c_str(),
+                            a.empty() ? "" : " by ", a.c_str());
                     formatAndSendText(settings["StationID"], 0);
                 }
                 lk.lock();
@@ -914,6 +923,7 @@ public:
         if (action == "start" || action == "playing") {
             playlistActive = true;
             mpcTitle.clear();   // the playlist's own media data takes over
+            mpcArtist.clear();
             startAction();
         } else if (action == "stop") {
             playlistActive = false;
@@ -982,12 +992,18 @@ public:
         return mpcAvailable && it != settings.end() && it->second != "0";
     }
 
-    // Ask mpd what it is playing. Runs on the sender thread with the queue
-    // lock released - it is a subprocess, and must not be holding anything
-    // the callbacks need.
-    static std::string readMpcTitle() {
+    // Ask mpd for one formatted field. Runs on the sender thread with the
+    // queue lock released - it is a subprocess, and must not be holding
+    // anything the callbacks need.
+    //
+    // stderr is discarded on purpose: with no mpd running, mpc writes
+    // "MPD error: Connection refused" there and leaves stdout empty, so
+    // without this the station would cheerfully broadcast that as its
+    // RadioText.
+    static std::string readMpcField(const char *format) {
         std::string out;
-        FILE *f = popen("mpc current -f %title% 2>/dev/null", "r");
+        std::string cmd = std::string("mpc current -f '") + format + "' 2>/dev/null";
+        FILE *f = popen(cmd.c_str(), "r");
         if (f == nullptr) {
             return out;
         }

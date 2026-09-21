@@ -100,6 +100,13 @@ public:
     std::string mpcTitle;
     std::string mpcArtist;
 
+    // Temporary overrides driven by FPP commands. Non-empty wins over the
+    // configured text; an empty string is how a command restores the
+    // configuration, so these are deliberately not "is set" flags.
+    std::string stationIdOverride;
+    std::string rdsTextOverride;
+    std::vector<Command*> myCommands;
+
     std::string title;
     std::string artist;
     std::string album;
@@ -156,9 +163,11 @@ public:
                     playlistActive = false;
                     stopAction();
                 }
-                formatAndSendText(settings["StationID"], 0);
+                formatAndSendText(effectiveStationId(), 0);
                 condition.notify_all();
             }
+
+            registerCommands();
 
             LogInfo(VB_PLUGIN, "KFMT: constructor complete\n");
         } catch (const std::exception &e) {
@@ -182,6 +191,7 @@ public:
     // so no readiness predicate is needed.
     virtual std::function<bool()> shutdown() override {
         unregisterApis();
+        unregisterCommands();
         stopSending();
         // This plugin raised the warning, so it takes it back rather than
         // leaving a stale one on the UI for a plugin that is no longer loaded.
@@ -191,6 +201,10 @@ public:
 
     virtual ~FPPKFMTPlugin() {
         LogDebug(VB_PLUGIN, "KFMT: destructor start\n");
+        // Backstop for a teardown that never called shutdown(). Both are
+        // no-ops once shutdown() has run - unregisterCommands() empties the
+        // list it iterates, so nothing is removed or deleted twice.
+        unregisterCommands();
         stopSending(); // no-op if shutdown() already ran
         LogDebug(VB_PLUGIN, "KFMT: destructor complete\n");
     }
@@ -237,7 +251,7 @@ public:
             }
             return;
         } else if (key == "StationID") {
-            formatAndSendText(settings["StationID"], 0);
+            formatAndSendText(effectiveStationId(), 0);
         } else if (key == "StationName" || key == "StationURL") {
             return;
         } else if (key == "StationIDTime") {
@@ -250,7 +264,7 @@ public:
                 mpcArtist.clear();
                 title.clear();
                 artist.clear();
-                formatAndSendText(settings["StationID"], 0);
+                formatAndSendText(effectiveStationId(), 0);
                 nextRDSTime = 0;
             }
         } else if (key == "Frequency") {
@@ -279,6 +293,9 @@ public:
     }
 
     void queueRadioWork(std::function<void()> fn) {
+        if (!running) {
+            return;   // never queue work the sender will not come back for
+        }
         std::lock_guard<std::mutex> lk(lock);
         functions.emplace(std::move(fn));
         condition.notify_all();
@@ -707,7 +724,7 @@ public:
                     album.clear();
                     LogInfo(VB_PLUGIN, "KFMT: After Hours \"%s\"%s%s\n", t.c_str(),
                             a.empty() ? "" : " by ", a.c_str());
-                    formatAndSendText(settings["StationID"], 0);
+                    formatAndSendText(effectiveStationId(), 0);
                 }
                 lk.lock();
                 if (changed) {
@@ -750,7 +767,12 @@ public:
                 if (detected) {
                     functions.emplace([this]() {
                         try {
-                            if (title.empty() && artist.empty() && album.empty()) {
+                            if (!rdsTextOverride.empty()) {
+                                // A command has taken the RadioText over; send
+                                // it plainly rather than RT+, which tags fields
+                                // that an announcement does not have.
+                                qn8027.sendRadioText(rdsTextOverride);
+                            } else if (title.empty() && artist.empty() && album.empty()) {
                                 qn8027.sendStationRadioTextPlus(settings["StationName"],
                                                                 settings["StationURL"]);
                             } else {
@@ -932,7 +954,7 @@ public:
             album.clear();
             track       = 0;
             mediaLength = 0;
-            formatAndSendText(settings["StationID"], 0);
+            formatAndSendText(effectiveStationId(), 0);
             nextRDSTime     = 0;
             nextStationTime = 0;
 
@@ -981,10 +1003,35 @@ public:
             }
         }
 
-        formatAndSendText(settings["StationID"], 0);
+        formatAndSendText(effectiveStationId(), 0);
         nextRDSTime     = 0;
         nextStationTime = 0;
         condition.notify_all();
+    }
+
+    // Set an override and push it out now. Runs on the sender thread, so the
+    // command handler itself never touches the chip.
+    void applyStationIdOverride(const std::string &text) {
+        queueRadioWork([this, text]() {
+            stationIdOverride = text;
+            LogInfo(VB_PLUGIN, "KFMT: station ID override %s\n",
+                    text.empty() ? "cleared" : ("-> \"" + text + "\"").c_str());
+            formatAndSendText(effectiveStationId(), 0);
+            curStationIdString = -1;   // restart the cycle on the new text
+            nextStationTime = 0;
+        });
+    }
+    void applyRdsTextOverride(const std::string &text) {
+        queueRadioWork([this, text]() {
+            rdsTextOverride = text;
+            LogInfo(VB_PLUGIN, "KFMT: RDS text override %s\n",
+                    text.empty() ? "cleared" : ("-> \"" + text + "\"").c_str());
+            nextRDSTime = 0;           // send it on the next pass, not in 2s
+        });
+    }
+
+    const std::string &effectiveStationId() {
+        return stationIdOverride.empty() ? settings["StationID"] : stationIdOverride;
     }
 
     bool afterHoursEnabled() const {
@@ -1017,6 +1064,70 @@ public:
             out.pop_back();
         }
         return out;
+    }
+
+    // FPP commands, so a show can put something on the air without editing
+    // the configuration - "Back in 10 minutes", "Tune to 88.1", and so on.
+    // Running either with an empty string restores the configured text, which
+    // is why blanks are allowed on the argument.
+    class StationIdCommand : public Command {
+    public:
+        StationIdCommand(FPPKFMTPlugin *p) :
+            Command("KFMT Station ID",
+                    "Temporarily replace the RDS station ID. Send an empty value to go "
+                    "back to the configured station ID."),
+            plugin(p) {
+            args.push_back(CommandArg("text", "string", "Station ID", true));
+        }
+        std::unique_ptr<Command::Result> run(const std::vector<std::string> &a) override {
+            plugin->applyStationIdOverride(a.empty() ? "" : a[0]);
+            return std::make_unique<Command::Result>(
+                (a.empty() || a[0].empty()) ? "Station ID restored" : "Station ID set");
+        }
+        FPPKFMTPlugin *plugin;
+    };
+
+    class RdsTextCommand : public Command {
+    public:
+        RdsTextCommand(FPPKFMTPlugin *p) :
+            Command("KFMT RDS Text",
+                    "Temporarily replace the RDS RadioText. Send an empty value to go "
+                    "back to the configured text and song information."),
+            plugin(p) {
+            args.push_back(CommandArg("text", "string", "RDS Text", true));
+        }
+        std::unique_ptr<Command::Result> run(const std::vector<std::string> &a) override {
+            plugin->applyRdsTextOverride(a.empty() ? "" : a[0]);
+            return std::make_unique<Command::Result>(
+                (a.empty() || a[0].empty()) ? "RDS text restored" : "RDS text set");
+        }
+        FPPKFMTPlugin *plugin;
+    };
+
+    void registerCommands() {
+        myCommands.push_back(new StationIdCommand(this));
+        myCommands.push_back(new RdsTextCommand(this));
+        for (auto *c : myCommands) {
+            CommandManager::INSTANCE.addCommand(c);
+        }
+    }
+    // A plugin owns what it registers. removeCommand() only unregisters - it
+    // does not delete, and does not wait for anything in flight - so the delete
+    // is ours, and it has to happen before this library is unmapped: a Command
+    // subclass declared here has its vtable in this .so.
+    //
+    // FPP keeps a backstop that deletes whatever a plugin leaves behind, and it
+    // compares the registered pointer before doing so, so withdrawing here is
+    // not a double delete - it is the path FPP expects, and skipping it earns a
+    // warning naming this plugin at unload.
+    //
+    // Idempotent: the list is cleared, so a second call finds nothing.
+    void unregisterCommands() {
+        for (auto *c : myCommands) {
+            CommandManager::INSTANCE.removeCommand(c);
+            delete c;
+        }
+        myCommands.clear();
     }
 
     void setDefaultSettings() {

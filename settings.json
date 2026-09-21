@@ -57,7 +57,7 @@
         "Frequency": {
             "name": "Frequency",
             "description": "FM Frequency",
-            "tip": "FM Frequency to broadcast on.",
+            "tip": "FM frequency to broadcast on. Pick a channel that is clear where you live - radio-locator.com has a vacant-channel search that lists the unused ones for your area.",
             "restart": 0,
             "reboot": 0,
             "type": "text",

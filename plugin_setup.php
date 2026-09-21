@@ -1,6 +1,7 @@
+<?php $kfmtFreqNote = "Not sure which frequency to use? <a href=\"https://radio-locator.com/cgi-bin/vacant\" target=\"_blank\" rel=\"noopener noreferrer\">radio-locator.com</a> lists the vacant FM channels for your area."; ?>
 <div id="global" class="settings">
 <?
-PrintSettingGroup("KFMTRadio", "", "", 1, "fpp-kfmt");
+PrintSettingGroup("KFMTRadio", "", $kfmtFreqNote, 1, "fpp-kfmt");
 PrintSettingGroup("KFMTRDSSettings", "", "", 1, "fpp-kfmt");
 ?>
 <style>

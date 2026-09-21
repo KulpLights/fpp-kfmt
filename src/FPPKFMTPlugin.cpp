@@ -506,9 +506,20 @@ public:
             return root;
         }
 
+        // Deliberately no detect() here. Polling it proved liveness the
+        // expensive way: it reads the CID registers through the resetting
+        // read, so one transient HID hiccup closed the bus, reported the chip
+        // missing, and reconnected - and reconnecting means a full SWRST and
+        // bring-up, measured at ~150 ms of dead carrier with RDS restarting.
+        // A glitch that should have cost one bad register read became an
+        // audible dropout, and only ever while someone had this page open.
+        //
+        // The RDS loop is already talking to the chip every 400 ms, and any
+        // real failure there closes the handle via handleI2CError(), so
+        // busOpen() is a sufficient and side-effect-free liveness signal.
         if (!detected) {
             attemptReconnect();
-        } else if (!qn8027.busOpen() || !qn8027.detect()) {
+        } else if (!qn8027.busOpen()) {
             detected = false;
             attemptReconnect();
         }

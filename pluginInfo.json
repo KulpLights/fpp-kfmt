@@ -1,13 +1,31 @@
 {
-	"repoName": "fpp-kfmt",
-	"name": "KulpLights K-FMT/QN8027",
-	"author": "Daniel Kulp",
-	"description": "RDS/Audio support for the KulpLights K-FMT FM Transmitter and QN8027-based devices.",
-	"homeURL": "https://github.com/KulpLights/fpp-kfmt",
-	"srcURL": "https://github.com/KulpLights/fpp-kfmt.git",
-	"bugURL": "https://github.com/KulpLights/fpp-kfmt/issues",
-	"iconURL": "https://raw.githubusercontent.com/KulpLights/fpp-kfmt/main/icon.png",
-	"versions": [
+    "repoName": "fpp-kfmt",
+    "name": "KulpLights K-FMT/QN8027",
+    "author": "Daniel Kulp",
+    "description": "RDS/Audio support for the KulpLights K-FMT FM Transmitter and QN8027-based devices. Broadcasts your show audio, and the playing song's title, artist and album as RDS text, over FM to any radio in range.",
+    "homeURL": "https://github.com/KulpLights/fpp-kfmt",
+    "srcURL": "https://github.com/KulpLights/fpp-kfmt.git",
+    "bugURL": "https://github.com/KulpLights/fpp-kfmt/issues",
+    "iconURL": "https://raw.githubusercontent.com/KulpLights/fpp-kfmt/main/icon.png",
+    "releaseNotesStyle": "gitHistory",
+    "privacy": {
+        "summary": "Drives a K-FMT or QN8027 FM transmitter attached to this device. Your show audio goes out over the air, along with the current song's title and artist as RDS text, to any radio in range.",
+        "sends": [
+            {
+                "to": "anyone in FM range",
+                "what": "your show audio and the playing song's title, artist and album",
+                "why": "broadcasting your show to nearby radios",
+                "alwaysOn": true
+            }
+        ],
+        "collects": [],
+        "sensors": [],
+        "remoteAccess": "none",
+        "systemChanges": [],
+        "closedCode": false,
+        "other": "FM transmission is regulated. Choosing a frequency and power level that are permitted where you live is up to the operator; the plugin cannot check it."
+    },
+    "versions": [
         {
             "minFPPVersion": "9.2",
             "maxFPPVersion": "9.99",
@@ -22,6 +40,5 @@
             "sha": "",
             "allowUpdates": 1
         }
-	]
+    ]
 }
-

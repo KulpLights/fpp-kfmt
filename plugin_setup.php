@@ -8,11 +8,15 @@ PrintSettingGroup("KFMTRDSSettings", "", "", 1, "fpp-kfmt");
 #kfmtPsChunks { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.95rem; letter-spacing: 0.02em; }
 .kfmt-ps-chunk {
     display: inline-block;
-    border: 1px solid #888;
+    /* FPP's own design-system tokens, redefined under [data-bs-theme='dark'],
+       so the boxes follow the theme instead of being a grey that is a
+       compromise in both. The literals are fallbacks for FPP 9.x, which this
+       plugin still supports and which may not define them. */
+    border: 1px solid var(--fpp-border, #888);
     border-radius: 3px;
     padding: 0.15rem 0.35rem;
     margin: 0.15rem 0.35rem 0.15rem 0;
-    background: rgba(127,127,127,0.12);
+    background: var(--fpp-bg-hover, rgba(127,127,127,0.12));
     white-space: pre;
 }
 .kfmt-ps-space { opacity: 0.45; }

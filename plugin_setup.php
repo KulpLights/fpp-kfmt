@@ -32,6 +32,7 @@ PrintSettingGroup("KFMTRDSSettings", "", "", 1, "fpp-kfmt");
 <div class="table-responsive" style="max-width: 40rem;">
 <table class="table table-sm">
   <tbody>
+    <tr><th scope="row">Adapter</th><td id="kfmtAdapter">—</td></tr>
     <tr><th scope="row">Channel</th><td id="kfmtChannel">—</td></tr>
     <tr><th scope="row">FSM</th><td id="kfmtFsm">—</td></tr>
     <tr><th scope="row">Carrier</th><td id="kfmtCarrier">—</td></tr>
@@ -57,8 +58,24 @@ function kfmtRefreshStatus() {
         cache: false
     })
         .done(function (s) {
+            if (s.adapterPresent === false) {
+                kfmtSetText('kfmtAdapter', 'Disconnected', true);
+                kfmtSetText('kfmtFsm', s.fsmName || 'Disconnected', true);
+                kfmtSetText('kfmtChannel', '—', false);
+                kfmtSetText('kfmtCarrier', '—', false);
+                kfmtSetText('kfmtMatch', '—', false);
+                kfmtSetText('kfmtPacap', '—', false);
+                kfmtSetText('kfmtPeak', '—', false);
+                return;
+            }
+            kfmtSetText('kfmtAdapter', 'Connected', false);
             if (!s.detected) {
-                kfmtSetText('kfmtFsm', 'QN8027 not detected', true);
+                kfmtSetText('kfmtFsm', s.fsmName || 'Needs FPPD restart', true);
+                kfmtSetText('kfmtChannel', '—', false);
+                kfmtSetText('kfmtCarrier', '—', false);
+                kfmtSetText('kfmtMatch', '—', false);
+                kfmtSetText('kfmtPacap', '—', false);
+                kfmtSetText('kfmtPeak', '—', false);
                 return;
             }
             kfmtSetText('kfmtChannel', (s.channel ? s.channel.toFixed(2) : '—') + ' MHz', false);

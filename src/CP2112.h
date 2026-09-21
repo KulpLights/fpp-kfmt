@@ -15,6 +15,10 @@ public:
 
     // Initialize the device (returns true if successful)
     bool init();
+    bool isOpen() const { return h != nullptr; }
+    static bool adapterPresent();
+    bool tryOpen(bool blinkLeds = true);
+    void closeHandle();
 
     // Write/Read operations matching I2CUtils interface
     void writeByteData(uint8_t regAddr, uint8_t data);

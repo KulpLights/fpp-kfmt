@@ -55,15 +55,13 @@ const char* QN8027::fsmName(uint8_t fsm) {
 
 QN8027::QN8027() {
 
-    // Primary: CP2112 HID-to-I2C bridge
+    // Primary: CP2112 HID-to-I2C bridge. Keep the object even if the
+    // adapter is unplugged so status polling can reopen it later.
     cp2112 = new CP2112();
     if (cp2112->init() && detect()) {
         LogInfo(VB_PLUGIN, "QN8027 detected via CP2112 HID bridge\n");
         channel = 87.9f;
         return;
-    } else {
-        delete cp2112;
-        cp2112 = nullptr;
     }
 
     // Fallback: try native Linux I2C
@@ -72,6 +70,8 @@ QN8027::QN8027() {
             i2c = new I2CUtils(bus, 0x2c);
             if (detect()) {
                 LogInfo(VB_PLUGIN, "QN8027 detected on native I2C bus %d\n", bus);
+                delete cp2112;
+                cp2112 = nullptr;
                 channel = 87.9f;
                 return;
             }
@@ -135,6 +135,41 @@ bool QN8027::detect() {
     uint8_t cid2 = read1Byte(REG_CID2);
     LogDebug(VB_PLUGIN, "CID1: %02X   CID2: %02X\n", cid1, cid2);
     return cid1 != 0 && cid1 != 0xFF && cid2 != 0 && cid2 != 0xFF;
+}
+
+bool QN8027::adapterPresent() const {
+    if (cp2112) {
+        return CP2112::adapterPresent();
+    }
+    return i2c != nullptr;
+}
+
+bool QN8027::busOpen() const {
+    if (cp2112) {
+        return cp2112->isOpen();
+    }
+    return i2c != nullptr;
+}
+
+bool QN8027::tryReconnect() {
+    if (i2c) {
+        return detect();
+    }
+    if (!cp2112) {
+        cp2112 = new CP2112();
+    }
+    if (cp2112->isOpen() && detect()) {
+        return true;
+    }
+    if (cp2112->isOpen()) {
+        cp2112->closeHandle();
+    }
+    if (!cp2112->tryOpen(false)) {
+        return false;
+    }
+    // Chip power-up after USB attach is ~100ms; constructor delay hid this.
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    return detect();
 }
 
 // ---------------------------------------------------------------------------

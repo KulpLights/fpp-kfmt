@@ -11,6 +11,9 @@ public:
     ~QN8027();
 
     bool detect();
+    bool adapterPresent() const;
+    bool busOpen() const;
+    bool tryReconnect();
     void reset();
 
     void printInfo();

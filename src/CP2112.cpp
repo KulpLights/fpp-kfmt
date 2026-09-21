@@ -45,13 +45,51 @@ constexpr uint8_t CMD_RESET             = 0x01;
 // ---------------------------------------------------------------------------
 
 CP2112::CP2112() {
+    tryOpen();
+}
+
+CP2112::~CP2112() {
+    closeHandle();
+}
+
+bool CP2112::adapterPresent() {
+    hid_device_info *devs = hid_enumerate(SILICON_LABS_VID, KFMT_PID);
+    if (!devs) {
+        devs = hid_enumerate(SILICON_LABS_VID, CP2112_PID);
+    }
+    bool found = false;
+    for (hid_device_info *cur = devs; cur; cur = cur->next) {
+        if (cur->vendor_id == SILICON_LABS_VID &&
+            (cur->product_id == KFMT_PID || cur->product_id == CP2112_PID)) {
+            found = true;
+            break;
+        }
+    }
+    if (devs) {
+        hid_free_enumeration(devs);
+    }
+    return found;
+}
+
+void CP2112::closeHandle() {
+    if (h) {
+        hid_close(h);
+        h = nullptr;
+    }
+    initialized = false;
+}
+
+bool CP2112::tryOpen(bool blinkLeds) {
+    if (h) {
+        return true;
+    }
+
     hid_device_info *devs = hid_enumerate(SILICON_LABS_VID, KFMT_PID);
     if (!devs) {
         devs = hid_enumerate(SILICON_LABS_VID, CP2112_PID);
     }
     if (!devs) {
-        LogErr(VB_PLUGIN, "CP2112: No HID devices found\n");
-        return;
+        return false;
     }
 
     hid_device_info *cur = devs;
@@ -77,23 +115,16 @@ CP2112::CP2112() {
     hid_free_enumeration(devs);
 
     if (found) {
-        configureGPIO();
+        if (blinkLeds) {
+            configureGPIO();
+        }
         configureSMB();
         initialized = true;
-    } else {
-        LogErr(VB_PLUGIN, "CP2112: Device not found or failed to open\n");
-        if (h) {
-            hid_close(h);
-            h = nullptr;
-        }
+        return true;
     }
-}
 
-CP2112::~CP2112() {
-    if (h) {
-        hid_close(h);
-        h = nullptr;
-    }
+    closeHandle();
+    return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -510,13 +541,11 @@ std::vector<uint8_t> CP2112::readI2CBlock(uint8_t length) {
 // ---------------------------------------------------------------------------
 
 void CP2112::handleI2CError() {
-    LogErr(VB_PLUGIN, "CP2112: I2C Error detected, resetting device\n");
-    if (h) {
-        std::vector<uint8_t> resetCmd = {CMD_RESET, 0x01};
-        hid_send_feature_report(h, resetCmd.data(), resetCmd.size());
-        std::this_thread::sleep_for(std::chrono::seconds(3));
-        hid_close(h);
-        h = nullptr;
+    if (!adapterPresent()) {
+        LogErr(VB_PLUGIN, "CP2112: USB adapter disconnected\n");
+        closeHandle();
+        return;
     }
-    // No throw here: errors are handled by return values instead of aborting
+    LogErr(VB_PLUGIN, "CP2112: I2C error, closing HID (no blocking reset)\n");
+    closeHandle();
 }

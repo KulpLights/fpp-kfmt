@@ -287,15 +287,17 @@ public:
     }
 
     void initializeQN8027() {
-        if (!detected) return;
-
-        LogInfo(VB_PLUGIN, "Initializing QN8027\n");
+        if (!qn8027.busOpen()) {
+            LogErr(VB_PLUGIN, "KFMT: initialize skipped, USB/I2C not open\n");
+            return;
+        }
 
         try {
             qn8027.reset();
             std::this_thread::sleep_for(std::chrono::milliseconds(2));
 
             float ffreq = safeStof(settings["Frequency"], 87.9f, "Frequency");
+            LogInfo(VB_PLUGIN, "Initializing QN8027 at %0.2f MHz\n", ffreq);
 
             std::string sc = settings["StationCode"];
             while (sc.length() < 4) sc += "A";
@@ -338,6 +340,9 @@ public:
             qn8027.setMonoAudio(false);
             qn8027.unmute();
             qn8027.startTransmit(true);
+            // RECAL can leave the chip on its reset channel (88.80). Program
+            // the saved frequency again now that TX is up.
+            qn8027.setChannel(ffreq);
             carrierEnabled = true;
             if (settings["AntennaRetunePolicy"] == "1" && !qn8027.antennaMatchOk()) {
                 lastRetuneOk = qn8027.retuneAntenna(3);
@@ -400,16 +405,101 @@ public:
         return it->second != "0";
     }
 
+    static constexpr const char *kDisconnectWarning = "K-FMT USB adapter disconnected.";
+    static constexpr const char *kReconnectRestartWarning =
+        "K-FMT USB adapter is connected but the transmitter did not resume. Restart FPPD.";
+    static constexpr int kMaxReconnectTries = 6;
+    uint64_t nextReconnectTry = 0;
+    int reconnectFails = 0;
+
+    bool attemptReconnect() {
+        if (reconnectFails >= kMaxReconnectTries) {
+            return false;
+        }
+        if (!qn8027.adapterPresent()) {
+            return false;
+        }
+        if (qn8027.tryReconnect()) {
+            reconnectFails = 0;
+            bringUpAfterReconnect();
+            return true;
+        }
+        reconnectFails++;
+        LogErr(VB_PLUGIN, "KFMT: reconnect attempt %d/%d failed\n",
+               reconnectFails, kMaxReconnectTries);
+        if (reconnectFails >= kMaxReconnectTries) {
+            WarningHolder::AddWarning(kReconnectRestartWarning);
+            LogErr(VB_PLUGIN, "KFMT: giving up reconnect until adapter is unplugged or FPPD restarts\n");
+        }
+        return false;
+    }
+
+    void bringUpAfterReconnect() {
+        LogInfo(VB_PLUGIN, "KFMT: USB adapter reconnected, initializing transmitter\n");
+        WarningHolder::RemoveWarning(kDisconnectWarning);
+        WarningHolder::RemoveWarning("Could not detect QN8027 device.");
+        WarningHolder::RemoveWarning(kReconnectRestartWarning);
+        detected = true;
+        initializeQN8027();
+        if (playlistActive || Player::INSTANCE.IsPlaying()) {
+            playlistActive = true;
+            startAction();
+        } else {
+            stopAction();
+        }
+    }
+
+    void markDisconnected(const char *link) {
+        detected = false;
+        carrierEnabled = false;
+        reconnectFails = 0;
+        WarningHolder::RemoveWarning(kReconnectRestartWarning);
+        WarningHolder::AddWarning(kDisconnectWarning);
+        LogInfo(VB_PLUGIN, "KFMT: %s\n", link);
+    }
+
     Json::Value statusJson() {
         Json::Value root;
-        root["detected"] = detected;
         root["playlistActive"] = playlistActive;
         root["carrierEnabled"] = carrierEnabled;
         root["lastRetune"] = lastRetuneResult;
         root["lastRetuneOk"] = lastRetuneOk;
-        if (!detected) {
+
+        const bool adapter = qn8027.adapterPresent();
+        root["adapterPresent"] = adapter;
+
+        if (!adapter) {
+            if (detected) {
+                markDisconnected("USB adapter disconnected");
+            }
+            root["detected"] = false;
+            root["link"] = "USB adapter disconnected";
+            root["fsmName"] = "Disconnected";
             return root;
         }
+
+        if (reconnectFails >= kMaxReconnectTries && !detected) {
+            root["detected"] = false;
+            root["link"] = "adapter connected, transmitter not running";
+            root["fsmName"] = "Needs FPPD restart";
+            return root;
+        }
+
+        if (!detected) {
+            attemptReconnect();
+        } else if (!qn8027.busOpen() || !qn8027.detect()) {
+            detected = false;
+            attemptReconnect();
+        }
+
+        root["detected"] = detected;
+        if (!detected) {
+            root["link"] = "adapter connected, transmitter not running";
+            root["fsmName"] = "Needs FPPD restart";
+            return root;
+        }
+
+        root["link"] = "ok";
         auto s = qn8027.snapshot();
         root["fsm"] = s.fsm;
         root["fsmName"] = QN8027::fsmName(s.fsm);
@@ -516,11 +606,15 @@ public:
             return;
         }
 
-        bool finished = runOnRadioThread([&]() { root = statusJson(); }, 2000);
+        bool finished = runOnRadioThread([&]() { root = statusJson(); }, 4000);
         if (!finished) {
-            root["detected"] = detected;
+            const bool adapter = qn8027.adapterPresent();
+            root["detected"] = false;
+            root["adapterPresent"] = adapter;
             root["error"] = "timeout";
-            callback(makeStringResponse(root.toStyledString(), 504, "application/json"));
+            root["link"] = adapter ? "status timeout" : "USB adapter disconnected";
+            root["fsmName"] = adapter ? "Unknown" : "Disconnected";
+            callback(makeStringResponse(root.toStyledString(), 200, "application/json"));
             return;
         }
         callback(makeStringResponse(root.toStyledString(), 200, "application/json"));
@@ -531,6 +625,14 @@ public:
 
         while (running) {
             uint64_t ct = GetTimeMS();
+
+            if (!detected && reconnectFails < kMaxReconnectTries &&
+                    ct > nextReconnectTry) {
+                nextReconnectTry = ct + 5000;
+                lk.unlock();
+                attemptReconnect();
+                lk.lock();
+            }
 
             // Advance to the next PS fragment every stationIdCycleTime seconds.
             // curStationIdString starts at -1 so the first advance sets it to 0.
@@ -543,7 +645,8 @@ public:
             }
 
             // Send the current PS fragment every ~400 ms so receivers can lock on quickly.
-            if (rdsEnabled() && carrierEnabled && ct > nextPSTime && curStationIdString >= 0 &&
+            if (rdsEnabled() && carrierEnabled && detected && qn8027.busOpen() &&
+                    ct > nextPSTime && curStationIdString >= 0 &&
                     curStationIdString < (int)stationIdStrings.size()) {
                 std::string s = stationIdStrings[curStationIdString];
                 if (detected) {
@@ -561,7 +664,8 @@ public:
             }
 
             // Send RT/RT+ every 2 seconds (includes Group 2A RT so all receivers benefit).
-            if (rdsEnabled() && carrierEnabled && ct > nextRDSTime) {
+            if (rdsEnabled() && carrierEnabled && detected && qn8027.busOpen() &&
+                    ct > nextRDSTime) {
                 if (detected) {
                     functions.emplace([this]() {
                         try {

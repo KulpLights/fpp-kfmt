@@ -590,6 +590,7 @@ void QN8027::waitForRDSSend() {
 
 void QN8027::sendStationName(const std::string &sn) {
     LogDebug(VB_PLUGIN, "Sending RDS Station ID: \"%s\"\n", sn.c_str());
+    lastStationName_ = sn;
     for (auto &p : rdsBuilder_.buildPSPackets(sn)) {
         sendRDS(p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7]);
         waitForRDSSend();
@@ -602,6 +603,7 @@ void QN8027::sendStationName(const std::string &sn) {
 
 void QN8027::sendRadioText(const std::string &rt) {
     LogDebug(VB_PLUGIN, "Sending RDS Radio Text: \"%s\"\n", rt.c_str());
+    lastRadioText_ = rt;
     for (auto &p : rdsBuilder_.buildRTPackets(rt)) {
         sendRDS(p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7]);
         waitForRDSSend();
@@ -622,6 +624,7 @@ void QN8027::sendStationRadioTextPlus(const std::string &stationName,
         sendRDS(p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7]);
         waitForRDSSend();
     }
+    lastRadioText_ = rdsBuilder_.lastRadioText();
 }
 
 // ---------------------------------------------------------------------------
@@ -635,6 +638,7 @@ void QN8027::sendItemRadioTextPlus(const std::string &artist,
         sendRDS(p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7]);
         waitForRDSSend();
     }
+    lastRadioText_ = rdsBuilder_.lastRadioText();
 }
 
 // ---------------------------------------------------------------------------

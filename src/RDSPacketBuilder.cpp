@@ -326,6 +326,8 @@ std::vector<RDSPacket> RDSPacketBuilder::buildStationRTPlusSequence(
     std::vector<RDSSegment> segments;
     segments.emplace_back((uint8_t)stationNameIdx, (uint8_t)stationNameLen, RT_PLUS_STATIONNAME);
     segments.emplace_back((uint8_t)homepageIdx,    (uint8_t)homepageLen,    RT_PLUS_HOMEPAGE);
+    // Before appendRTPlusSegments(), which eats rt as it packs it.
+    lastRadioText_ = rt;
     appendRTPlusSegments(rt, segments, false, out);
     return out;
 }
@@ -411,6 +413,8 @@ std::vector<RDSPacket> RDSPacketBuilder::buildItemRTPlusSequence(
     segments.emplace_back((uint8_t)titleIdx,  (uint8_t)titleLen,  RT_PLUS_TITLE);
     segments.emplace_back((uint8_t)artistIdx, (uint8_t)artistLen, RT_PLUS_ARTIST);
     segments.emplace_back((uint8_t)albumIdx,  (uint8_t)albumLen,  RT_PLUS_ALBUM);
+    // Before appendRTPlusSegments(), which eats rt as it packs it.
+    lastRadioText_ = rt;
     appendRTPlusSegments(rt, segments,
                          !title.empty() || !album.empty() || !artist.empty(),
                          out);

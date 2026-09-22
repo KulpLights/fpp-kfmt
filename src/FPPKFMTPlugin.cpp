@@ -21,6 +21,7 @@
 #include "Plugin.h"
 #include "log.h"
 #include "commands/Commands.h"
+#include "CurlManager.h"
 #include "Player.h"
 #include "QN8027.h"
 #include "Warnings.h"
@@ -52,6 +53,22 @@ namespace {
     void padTo(std::string &s, int l) {
         size_t n = l - s.size();
         if (n) s.append(n, ' ');
+    }
+
+    // TransmitterState's stored values, and the labels settings.json shows
+    // for them. The command takes either, so its dropdown can offer the same
+    // words as the settings page while a REST caller can still pass the
+    // stored "2". An empty return means the string was neither.
+    std::string transmitterStateValue(const std::string &s) {
+        if (s == "0" || s == "Follow Idle Setting")  return "0";
+        if (s == "1" || s == "Force On"  || s == "On")  return "1";
+        if (s == "2" || s == "Force Off" || s == "Off") return "2";
+        return "";
+    }
+    const char *transmitterStateName(const std::string &v) {
+        if (v == "1") return "Force On";
+        if (v == "2") return "Force Off";
+        return "Follow Idle Setting";
     }
 }
 
@@ -101,10 +118,24 @@ public:
     std::string mpcArtist;
 
     // Temporary overrides driven by FPP commands. Non-empty wins over the
-    // configured text; an empty string is how a command restores the
+    // configured value; an empty string is how a command restores the
     // configuration, so these are deliberately not "is set" flags.
+    //
+    // The transmitter state is deliberately NOT one of these. It is a saved
+    // setting: forcing the carrier off overnight has to survive an fppd
+    // restart at 3am, and it has to be visible on the settings page rather
+    // than being invisible state the page has to apologise for.
     std::string stationIdOverride;
     std::string rdsTextOverride;
+
+    // Which branch last produced the RadioText. Set where the choice is made,
+    // so the page can say where the text came from rather than leaving someone
+    // to work out why it is not what the settings page shows. Sender thread
+    // only, like the sends themselves.
+    const char *rdsSource = "nothing sent yet";
+
+    // playlistActive is a hint, not the truth - see showIsPlaying().
+    uint64_t playlistIdleSince = 0;
     std::vector<Command*> myCommands;
 
     std::string title;
@@ -156,13 +187,8 @@ public:
                 // mute/stop — the "start" callback already happened before
                 // this plugin was loaded. FPP will send "playing" (not
                 // "start") on a restart of the current playlist.
-                if (Player::INSTANCE.IsPlaying()) {
-                    playlistActive = true;
-                    startAction();
-                } else {
-                    playlistActive = false;
-                    stopAction();
-                }
+                playlistActive = Player::INSTANCE.IsPlaying();
+                queueApplyRadioState();
                 formatAndSendText(effectiveStationId(), 0);
                 condition.notify_all();
             }
@@ -192,6 +218,9 @@ public:
     virtual std::function<bool()> shutdown() override {
         unregisterApis();
         unregisterCommands();
+        // Commands are gone, so nothing can start another request; this takes
+        // back one a command may have left in flight. See applyTransmitterState().
+        CurlManager::INSTANCE.cancelRequests(name);
         stopSending();
         // This plugin raised the warning, so it takes it back rather than
         // leaving a stale one on the UI for a plugin that is no longer loaded.
@@ -201,10 +230,12 @@ public:
 
     virtual ~FPPKFMTPlugin() {
         LogDebug(VB_PLUGIN, "KFMT: destructor start\n");
-        // Backstop for a teardown that never called shutdown(). Both are
+        // Backstop for a teardown that never called shutdown(). All three are
         // no-ops once shutdown() has run - unregisterCommands() empties the
-        // list it iterates, so nothing is removed or deleted twice.
+        // list it iterates, so nothing is removed or deleted twice, and
+        // cancelRequests() finds nothing left tagged with this name.
         unregisterCommands();
+        CurlManager::INSTANCE.cancelRequests(name);
         stopSending(); // no-op if shutdown() already ran
         LogDebug(VB_PLUGIN, "KFMT: destructor complete\n");
     }
@@ -242,13 +273,11 @@ public:
         LogInfo(VB_PLUGIN, "KFMT: Setting changed %s = %s\n",
                 key.c_str(), value.c_str());
 
-        if (key == "IdleAction") {
-            if (playlistActive || Player::INSTANCE.IsPlaying()) {
-                playlistActive = true;
-                startAction();
-            } else {
-                stopAction();
-            }
+        if (key == "IdleAction" || key == "TransmitterState") {
+            // Both feed the same decision, and applyRadioState() makes it
+            // from scratch - so neither needs to know what the other is, and
+            // neither has to guess whether a playlist is running.
+            queueApplyRadioState();
             return;
         } else if (key == "StationID") {
             formatAndSendText(effectiveStationId(), 0);
@@ -270,10 +299,10 @@ public:
         } else if (key == "Frequency") {
             // Channel change retunes the antenna; a full bring-up is required.
             queueRadioWork([this]() { initializeQN8027(); });
-            restoreAfterRadioChange();
+            queueApplyRadioState();
         } else if (key == "TransmitPower" && detected) {
             queueRadioWork([this]() { applyTransmitPower(); });
-            restoreAfterRadioChange();
+            queueApplyRadioState();
         } else if (detected &&
                    (key == "Preemphasis" || key == "InputImpedance" ||
                     key == "TXDigitalGain" || key == "TXInputBufferGain" ||
@@ -283,13 +312,8 @@ public:
         }
     }
 
-    void restoreAfterRadioChange() {
-        if (playlistActive || Player::INSTANCE.IsPlaying()) {
-            playlistActive = true;
-            startAction();
-        } else {
-            stopAction();
-        }
+    void queueApplyRadioState() {
+        queueRadioWork([this]() { applyRadioState(); });
     }
 
     void queueRadioWork(std::function<void()> fn) {
@@ -505,12 +529,10 @@ public:
         WarningHolder::RemoveWarning(kReconnectRestartWarning);
         detected = true;
         initializeQN8027();
-        if (playlistActive || Player::INSTANCE.IsPlaying()) {
-            playlistActive = true;
-            startAction();
-        } else {
-            stopAction();
-        }
+        // Already on the sender thread (the run loop drops the queue lock
+        // before calling attemptReconnect), so apply directly rather than
+        // queueing behind whatever else is waiting.
+        applyRadioState();
     }
 
     void markDisconnected(const char *link) {
@@ -528,6 +550,59 @@ public:
         root["carrierEnabled"] = carrierEnabled;
         root["lastRetune"] = lastRetuneResult;
         root["lastRetuneOk"] = lastRetuneOk;
+
+        // Above the early returns below on purpose. An override is plugin
+        // state, not chip state, and someone is most likely to have this page
+        // open when the transmitter is unhappy - which is the worst moment for
+        // the reason the radio is behaving oddly to vanish from the page.
+        //
+        // No locking: this runs on the sender thread via runOnRadioThread(),
+        // which is the same thread the override commands write from.
+        //
+        // The idle override is sent as its label rather than its stored "1",
+        // so the page does not need a second copy of the mapping.
+        root["stationIdOverride"] = stationIdOverride;
+        root["rdsTextOverride"]   = rdsTextOverride;
+
+        // The page explains the carrier with the same string applyRadioState()
+        // logged, computed the same way, so what it shows and what the radio
+        // was told can never drift apart.
+        const RadioTarget t = desiredRadioState();
+        root["carrierWhy"] = t.why;
+        auto tsIt = settings.find("TransmitterState");
+        const std::string ts = (tsIt == settings.end() || tsIt->second.empty())
+                                   ? std::string("0") : tsIt->second;
+        root["transmitterState"]  = transmitterStateName(ts);
+        root["transmitterForced"] = (ts == "1" || ts == "2");
+        // The stored value as well as the label: a command can change this
+        // setting behind the settings page's back, and the page needs the
+        // option value to put its own field back in step.
+        root["transmitterStateValue"] = ts;
+
+        // What is actually going out, as recorded where it was sent. The chip
+        // cannot be asked - it has no register for this - so nothing here
+        // costs an I2C exchange. See QN8027::lastStationName().
+        root["psOnAir"]   = qn8027.lastStationName();
+        root["rtOnAir"]   = qn8027.lastRadioText();
+        root["rdsSource"] = rdsSource;
+        // Nothing is on the air without both of these, so the page can say
+        // "not being sent" instead of showing text nobody can hear.
+        root["rdsEnabled"] = rdsEnabled();
+        {
+            // The PS fragments are written by formatAndSendText() from the
+            // callback and HTTP threads under this lock, so snapshot them
+            // rather than reading them bare. Safe to take here: statusJson()
+            // only ever runs from a queued job, and the run loop releases the
+            // lock before invoking one.
+            std::lock_guard<std::mutex> lk(lock);
+            std::string full;
+            for (const auto &f : stationIdStrings) {
+                full += f;
+            }
+            root["psFullText"] = full;
+            root["psScreen"]   = curStationIdString + 1;   // 1-based for display
+            root["psScreens"]  = (int)stationIdStrings.size();
+        }
 
         const bool adapter = qn8027.adapterPresent();
         root["adapterPresent"] = adapter;
@@ -596,12 +671,20 @@ public:
         FPPPlugins::registerPluginApi("/kfmt", handler, {drogon::Get, drogon::Post}, false);
         FPPPlugins::registerPluginApi("/kfmt/retune", handler, {drogon::Get, drogon::Post}, false);
         FPPPlugins::registerPluginApi("/kfmt/clearpeak", handler, {drogon::Get, drogon::Post}, false);
+        // One route per override rather than one that takes which: the handler
+        // matches on the path by substring, so the discriminator has to be in
+        // the path anyway, and a typo then 404s instead of silently clearing
+        // whichever one the fallback happened to pick.
+        FPPPlugins::registerPluginApi("/kfmt/clearoverride/stationid", handler, {drogon::Post}, false);
+        FPPPlugins::registerPluginApi("/kfmt/clearoverride/rdstext", handler, {drogon::Post}, false);
     }
 
     void unregisterApis() override {
         FPPPlugins::unregisterPluginApi("/kfmt");
         FPPPlugins::unregisterPluginApi("/kfmt/retune");
         FPPPlugins::unregisterPluginApi("/kfmt/clearpeak");
+        FPPPlugins::unregisterPluginApi("/kfmt/clearoverride/stationid");
+        FPPPlugins::unregisterPluginApi("/kfmt/clearoverride/rdstext");
     }
 
     void handleKfmtApi(const HttpRequestPtr &req, HttpCallback &&callback) {
@@ -647,18 +730,11 @@ public:
                 j.ok = true;
                 lastRetuneOk = true;
                 lastRetuneResult = "done";
-                const bool wantCarrier =
-                    playlistActive || settings["IdleAction"] != "2";
-                if (wantCarrier) {
-                    qn8027.startTransmit(false);
-                    carrierEnabled = true;
-                    if (!playlistActive && settings["IdleAction"] == "1") {
-                        qn8027.mute();
-                    }
-                } else {
-                    qn8027.stopTransmit();
-                    carrierEnabled = false;
-                }
+                // The retune drops the carrier, so forget it is up and let
+                // applyRadioState() decide whether to bring it back - rather
+                // than this path keeping its own copy of that decision.
+                carrierEnabled = false;
+                applyRadioState();
                 j.result = statusJson();
                 j.result["ok"] = j.ok;
             }, 8000);
@@ -669,6 +745,47 @@ public:
                 return;
             }
             callback(makeStringResponse(job->result.toStyledString(), 200, "application/json"));
+            return;
+        }
+
+        if (path.find("clearoverride") != std::string::npos && method == drogon::Post) {
+            // Reuses the command handlers, so the page and a command clear an
+            // override by exactly the same route - including their logging and
+            // their "put the radio back the way it should be" follow-up.
+            if (path.find("stationid") != std::string::npos) {
+                applyStationIdOverride("");
+            } else if (path.find("rdstext") != std::string::npos) {
+                applyRdsTextOverride("");
+            } else {
+                root["ok"] = false;
+                root["error"] = "unknown override";
+                callback(makeStringResponse(root.toStyledString(), 404, "application/json"));
+                return;
+            }
+
+            // The clear is queued above and runs whether or not the chip is
+            // there, but runOnRadioThread() refuses when it is not detected.
+            // Answering without a status read beats reporting a timeout for
+            // work that in fact went through; the page's next poll carries the
+            // new state either way.
+            if (!detected) {
+                root["ok"] = true;
+                callback(makeStringResponse(root.toStyledString(), 200, "application/json"));
+                return;
+            }
+            // Queued behind the clear, so the status this answers with
+            // already reflects it.
+            auto cleared = runOnRadioThread([this](RadioJob &j) {
+                j.result = statusJson();
+                j.result["ok"] = true;
+            }, 4000);
+            if (!cleared) {
+                root["ok"] = false;
+                root["error"] = "timeout";
+                callback(makeStringResponse(root.toStyledString(), 504, "application/json"));
+                return;
+            }
+            callback(makeStringResponse(cleared->result.toStyledString(), 200, "application/json"));
             return;
         }
 
@@ -697,6 +814,34 @@ public:
                 lk.unlock();
                 attemptReconnect();
                 lk.lock();
+            }
+
+            // playlistActive is a latch: the start/playing/media callbacks set
+            // it, and only a "stop" callback clears it. FPP emits "stop" for
+            // section changes in the middle of a playlist as well as at the
+            // end of one, and the final one can be missed entirely - at which
+            // point the latch is stuck on, every idle action silently becomes
+            // a no-op, and nothing short of restarting fppd recovers it. That
+            // is exactly what was seen in the field.
+            //
+            // The player itself always knows, so reconcile against it. The
+            // delay is because the callbacks can land marginally before the
+            // player reports itself playing, and a bare disagreement would
+            // then flap the carrier at the start of every show.
+            if (playlistActive && !Player::INSTANCE.IsPlaying()) {
+                if (playlistIdleSince == 0) {
+                    playlistIdleSince = ct;
+                } else if (ct - playlistIdleSince > 2000) {
+                    LogInfo(VB_PLUGIN, "KFMT: player is idle but the playlist flag "
+                                       "was still set - clearing it\n");
+                    playlistActive = false;
+                    playlistIdleSince = 0;
+                    // Queued, not called: this holds the queue lock, and
+                    // playlistStopped() takes it again via formatAndSendText().
+                    functions.emplace([this]() { playlistStopped(); });
+                }
+            } else if (playlistIdleSince != 0) {
+                playlistIdleSince = 0;
             }
 
             // While nothing is playing, follow the After Hours stream's title.
@@ -771,11 +916,15 @@ public:
                                 // A command has taken the RadioText over; send
                                 // it plainly rather than RT+, which tags fields
                                 // that an announcement does not have.
+                                rdsSource = "command override";
                                 qn8027.sendRadioText(rdsTextOverride);
                             } else if (title.empty() && artist.empty() && album.empty()) {
+                                rdsSource = "station name and URL";
                                 qn8027.sendStationRadioTextPlus(settings["StationName"],
                                                                 settings["StationURL"]);
                             } else {
+                                rdsSource = playlistActive ? "playlist media"
+                                                           : "After Hours stream";
                                 qn8027.sendItemRadioTextPlus(artist, title, album);
                             }
                         } catch (const std::exception &e) {
@@ -808,59 +957,89 @@ public:
         }
     }
 
-    void startAction() {
-        if (!detected) return;
-
-        std::lock_guard<std::mutex> lk(lock);
-        functions.emplace([this]() {
-            try {
-                // Always restore the audio path when something is playing.
-                // Leave Alone previously did nothing here, so a chip left
-                // muted or with the PA down stayed silent until a setting
-                // change re-ran initializeQN8027().
-                qn8027.unmute();
-                if (!carrierEnabled) {
-                    qn8027.startTransmit(false);
-                    carrierEnabled = true;
-                }
-            } catch (...) {
-                LogErr(VB_PLUGIN, "KFMT: exception in startAction()\n");
-            }
-        });
-        condition.notify_all();
+    // Player::INSTANCE is the authority on whether a show is running.
+    // playlistActive only carries what the callbacks have told us since, which
+    // matters because mediaCallback can learn that audio is flowing before the
+    // player reports itself playing. The run loop reconciles the two, so this
+    // cannot stay stuck on the way the bare latch could.
+    bool showIsPlaying() const {
+        return Player::INSTANCE.IsPlaying() || playlistActive;
     }
 
-    // Realize the current IdleAction on the chip. Used after a playlist
-    // stops and when IdleAction is changed while idle — so switching from
-    // Disable Carrier back to Leave Alone or Mute turns the carrier on
-    // without needing to play something.
-    void stopAction() {
-        if (!detected) return;
+    struct RadioTarget {
+        bool carrier;
+        bool mute;
+        const char *why;
+    };
 
-        std::lock_guard<std::mutex> lk(lock);
-        functions.emplace([this]() {
-            try {
-                const std::string &idle = settings["IdleAction"];
-                LogInfo(VB_PLUGIN, "KFMT: applying idle action %s\n", idle.c_str());
-                if (idle == "2") {
-                    qn8027.stopTransmit();
-                    carrierEnabled = false;
-                } else {
-                    if (!carrierEnabled) {
-                        qn8027.startTransmit(false);
-                        carrierEnabled = true;
-                    }
-                    if (idle == "1") {
-                        qn8027.mute();
-                    } else {
-                        qn8027.unmute();
-                    }
-                }
-            } catch (...) {
-                LogErr(VB_PLUGIN, "KFMT: exception in stopAction()\n");
+    // What the radio should be doing right now, from scratch, given the saved
+    // settings and whether a show is running. Deriving it in one place is what
+    // makes applyRadioState() safe to queue from anywhere: two of them landing
+    // together converge on the same answer instead of the later one clobbering
+    // the earlier, which is how a command and a playlist callback arriving in
+    // the same millisecond used to leave the carrier up after a "turn it off".
+    RadioTarget desiredRadioState() const {
+        auto get = [this](const char *k, const char *dflt) {
+            auto it = settings.find(k);
+            return (it == settings.end() || it->second.empty()) ? std::string(dflt)
+                                                                : it->second;
+        };
+        const std::string ts = get("TransmitterState", "0");
+        if (ts == "2") return {false, false, "transmitter forced off"};
+        if (ts == "1") return {true,  false, "transmitter forced on"};
+        if (showIsPlaying()) return {true, false, "show is playing"};
+
+        const std::string idle = get("IdleAction", "0");
+        if (idle == "2") return {false, false, "idle: disable carrier"};
+        if (idle == "1") return {true,  true,  "idle: mute"};
+        return {true, false, "idle: leave alone"};
+    }
+
+    // Drive the chip to that state. The only place start/stop/mute are issued.
+    // Runs on the sender thread; queue it with queueApplyRadioState().
+    void applyRadioState() {
+        if (!detected) return;
+        try {
+            const RadioTarget t = desiredRadioState();
+            // Logged on every pass, both branches. The old startAction() said
+            // nothing, so a carrier coming back up right after an idle action
+            // turned it off was invisible in the log - which is what made this
+            // look like the command had done nothing at all.
+            LogInfo(VB_PLUGIN, "KFMT: radio state -> carrier %s%s (%s)\n",
+                    t.carrier ? "on" : "off", t.mute ? ", muted" : "", t.why);
+            if (!t.carrier) {
+                qn8027.stopTransmit();
+                carrierEnabled = false;
+                return;
             }
-        });
-        condition.notify_all();
+            if (!carrierEnabled) {
+                qn8027.startTransmit(false);
+                carrierEnabled = true;
+            }
+            if (t.mute) {
+                qn8027.mute();
+            } else {
+                qn8027.unmute();
+            }
+        } catch (...) {
+            LogErr(VB_PLUGIN, "KFMT: exception in applyRadioState()\n");
+        }
+    }
+
+    // Everything that has to happen once the show is over, from wherever we
+    // learn it - the "stop" callback, or the run loop noticing the player went
+    // idle without one. Runs on the sender thread, so formatAndSendText() is
+    // safe to call here.
+    void playlistStopped() {
+        artist.clear();
+        title.clear();
+        album.clear();
+        track       = 0;
+        mediaLength = 0;
+        formatAndSendText(effectiveStationId(), 0);
+        nextRDSTime     = 0;
+        nextStationTime = 0;
+        applyRadioState();
     }
 
     void formatAndSendText(const std::string &text, int location) {
@@ -946,19 +1125,15 @@ public:
             playlistActive = true;
             mpcTitle.clear();   // the playlist's own media data takes over
             mpcArtist.clear();
-            startAction();
+            queueApplyRadioState();
         } else if (action == "stop") {
+            // FPP sends "stop" for section changes inside a running playlist
+            // too, so this is not on its own proof the show is over. Clearing
+            // the flag is still right - the run loop reconciles against the
+            // player, and a section change is followed immediately by a
+            // "playing" that sets it again.
             playlistActive = false;
-            artist.clear();
-            title.clear();
-            album.clear();
-            track       = 0;
-            mediaLength = 0;
-            formatAndSendText(effectiveStationId(), 0);
-            nextRDSTime     = 0;
-            nextStationTime = 0;
-
-            stopAction();
+            queueRadioWork([this]() { playlistStopped(); });
         }
     }
 
@@ -967,7 +1142,7 @@ public:
         // Audio is actually starting; undo idle mute even if we missed
         // playlist "start" (plugin loaded mid-show, or FPP sent "playing").
         playlistActive = true;
-        startAction();
+        queueApplyRadioState();
 
         title       = mediaDetails.title;
         artist      = mediaDetails.artist;
@@ -1028,6 +1203,40 @@ public:
                     text.empty() ? "cleared" : ("-> \"" + text + "\"").c_str());
             nextRDSTime = 0;           // send it on the next pass, not in 2s
         });
+    }
+
+    // The transmitter state is a saved setting, and FPP has exactly one writer
+    // for those: the endpoint the settings page itself posts to. Writing
+    // config/plugin.<name> from here would be a second implementation of that
+    // file's format, quoting and locking, in another language.
+    //
+    // Nothing is applied here. FPP writes the file, the settings FileMonitor
+    // sees the key differ, and settingChanged("TransmitterState") queues the
+    // apply - the identical path a change made on the settings page takes, so
+    // the page and a command cannot end up disagreeing.
+    //
+    // Localhost needs no credentials even on a password-protected player:
+    // FPP's apache site OR's "Require local" with the password config.
+    //
+    // Tagged with this plugin's name so shutdown() can cancel it. The
+    // callback's code lives in this library, so one still in flight after an
+    // unload is a call into an unmapped .so; cancelRequests() destroys it
+    // uninvoked, which is what releases it while the library is still mapped.
+    void applyTransmitterState(const std::string &value) {
+        CurlManager::INSTANCE.addPut(
+            "http://localhost/api/plugin/" + name + "/settings/TransmitterState",
+            value, "text/plain",
+            [value](int rc, const std::string &resp) {
+                if (rc == 200) {
+                    LogInfo(VB_PLUGIN, "KFMT: transmitter state saved as %s\n",
+                            transmitterStateName(value));
+                } else {
+                    LogErr(VB_PLUGIN,
+                           "KFMT: could not save transmitter state (HTTP %d): %s\n",
+                           rc, resp.c_str());
+                }
+            },
+            name);
     }
 
     const std::string &effectiveStationId() {
@@ -1104,9 +1313,45 @@ public:
         FPPKFMTPlugin *plugin;
     };
 
+    // Says what it does and does it now, whether or not a playlist is running.
+    // The idle behaviour it replaced could only ever take effect at the next
+    // "stop" callback, which is no use to a show that wants the transmitter
+    // off at the end of the night - and no use at all if that callback never
+    // arrives. Unlike the text commands this one saves, so a transmitter
+    // forced off overnight is still off after a 3am restart.
+    class TransmitterCommand : public Command {
+    public:
+        TransmitterCommand(FPPKFMTPlugin *p) :
+            Command("KFMT Transmitter",
+                    "Force the FM carrier on or off, or let it follow the Playlist Idle "
+                    "Behavior setting. Takes effect immediately and is saved, so Force "
+                    "Off keeps the transmitter off until it is set back."),
+            plugin(p) {
+            args.push_back(CommandArg("state", "string", "Transmitter")
+                               .setContentList({"Follow Idle Setting", "Force On",
+                                                "Force Off"})
+                               .setDefaultValue("Follow Idle Setting"));
+        }
+        std::unique_ptr<Command::Result> run(const std::vector<std::string> &a) override {
+            if (a.empty()) {
+                return std::make_unique<Command::ErrorResult>("No transmitter state given");
+            }
+            const std::string v = transmitterStateValue(a[0]);
+            if (v.empty()) {
+                return std::make_unique<Command::ErrorResult>(
+                    "Unknown transmitter state \"" + a[0] + "\"");
+            }
+            plugin->applyTransmitterState(v);
+            return std::make_unique<Command::Result>(
+                std::string("Transmitter set to ") + transmitterStateName(v));
+        }
+        FPPKFMTPlugin *plugin;
+    };
+
     void registerCommands() {
         myCommands.push_back(new StationIdCommand(this));
         myCommands.push_back(new RdsTextCommand(this));
+        myCommands.push_back(new TransmitterCommand(this));
         for (auto *c : myCommands) {
             CommandManager::INSTANCE.addCommand(c);
         }
@@ -1133,6 +1378,7 @@ public:
     void setDefaultSettings() {
         setIfNotFound("Frequency", "87.9");
         setIfNotFound("IdleAction", "0");
+        setIfNotFound("TransmitterState", "0");
         setIfNotFound("Preemphasis", "1");
 
         setIfNotFound("RDSEnable", "1");
@@ -1169,10 +1415,13 @@ public:
 
 // Safe to dlclose() on unload: the only thread is the I2C sender, and shutdown()
 // stops and joins it. HTTP routes go through registerPluginApi() and are
-// withdrawn in unregisterApis()/shutdown(). No timers, no CurlManager requests,
-// no epoll descriptors, no commands. The settings FileMonitor entry is registered
-// and removed by FPPPlugins::Plugin itself, in its destructor, which runs before
-// the library is unmapped.
+// withdrawn in unregisterApis()/shutdown(). Commands are withdrawn AND deleted
+// there too, and the CurlManager request the transmitter command issues is
+// tagged with this plugin's name and cancelled there, which destroys its
+// callback while this library is still mapped. No timers, no epoll descriptors.
+// The settings FileMonitor entry is registered and removed by
+// FPPPlugins::Plugin itself, in its destructor, which runs before the library
+// is unmapped.
 //
 // The USB HID path (CP2112) does not change that, which is worth spelling out
 // because fpp-vastfmt also talks to USB HID and deliberately does NOT opt in.

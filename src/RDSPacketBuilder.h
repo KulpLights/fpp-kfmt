@@ -66,7 +66,15 @@ public:
     // Group 3A + Group 11A: disable RT+ item running bit
     std::vector<RDSPacket> buildRTPlusDisableSequence();
 
+    // The RadioText the last RT+ sequence was built from. The RT+ builders
+    // assemble it out of their arguments and then consume it segment by
+    // segment, so this is the only way to get at the finished string - and
+    // keeping it here rather than re-deriving it in the caller means there is
+    // one copy of the "title - artist - album" rules, not two that can drift.
+    const std::string &lastRadioText() const { return lastRadioText_; }
+
 private:
+    std::string lastRadioText_;
     uint16_t piCode_       = 0;
     uint8_t  ptyCode_      = 0;
     bool     stereo_       = true;

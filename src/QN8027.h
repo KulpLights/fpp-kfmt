@@ -29,6 +29,14 @@ public:
                                const std::string &album);
     void disableRadioTextPlus();
 
+    // What was last actually put on the air. The QN8027 has no register that
+    // reports the RDS it is transmitting - and reading one that does not exist
+    // returns stale bus data rather than failing - so this is recorded where
+    // it is sent instead of being asked for. No I2C, and no lock: the sender
+    // thread is the only thing that calls the send methods above.
+    const std::string &lastStationName() const { return lastStationName_; }
+    const std::string &lastRadioText() const { return lastRadioText_; }
+
 
     void setStationCode(const std::string &sc);
     void setProgramType(uint8_t pty);
@@ -87,6 +95,9 @@ public:
     void waitForIdle(int maxms);
     void waitForCalComplete(int maxms);
 private:
+    std::string lastStationName_;
+    std::string lastRadioText_;
+
     I2CUtils *i2c = nullptr;
     CP2112 *cp2112 = nullptr;
 

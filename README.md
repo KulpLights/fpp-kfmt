@@ -23,6 +23,24 @@ to the host board is required.
 - Audio input impedance, TX digital gain, and TX input buffer gain.
 - Configurable idle behaviour for when no playlist is running — leave the carrier alone, mute, or
   disable the carrier.
+- A saved transmitter state that forces the carrier on or off regardless, settable from the page or
+  from an FPP command, for shutting the transmitter down outside show hours.
+
+## Commands
+
+The plugin registers FPP commands, so a playlist entry, a scheduled event or the REST API can
+change the broadcast without opening the settings page.
+
+- *KFMT Transmitter* — Follow Idle Setting, Force On or Force Off. Takes effect immediately whether
+  or not a playlist is running, and **is saved**: Force Off keeps the transmitter off until it is set
+  back, including across a restart. Use it to shut the transmitter down overnight. It sets the
+  *Transmitter* setting, so the settings page always shows what is in force.
+- *KFMT Station ID* — temporarily replace the RDS station ID.
+- *KFMT RDS Text* — temporarily replace the RDS RadioText.
+
+The two RDS commands are temporary: they override the configuration rather than saving over it,
+running one with an empty value puts the configured text back, and a restart clears them. While one
+is in force the settings page shows a note on the field it overrides, with a button to clear it.
 
 ## Installation
 
@@ -34,6 +52,8 @@ Install from **Content Setup → Plugins** in the FPP web UI, then restart FPPD.
 
 **Radio Settings**
 
+- *Transmitter* — Follow Idle Setting (normal), Force On, or Force Off. Overrides the idle behaviour
+  below; saved, so a forced state survives a restart.
 - *FM Frequency* — transmit frequency.
 - *Preemphasis* — preemphasis time constant.
 - *Playlist Idle Behavior* — Leave Alone, Mute, or Disable Carrier when nothing is playing.

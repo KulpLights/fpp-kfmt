@@ -3,6 +3,7 @@
         "KFMTRadio": {
             "description": "Radio Settings",
             "settings": [
+                "TransmitterState",
                 "Frequency",
                 "Preemphasis",
                 "IdleAction",
@@ -27,10 +28,24 @@
         }
     },
     "settings": {
+        "TransmitterState": {
+            "name": "TransmitterState",
+            "description": "Transmitter",
+            "tip": "Force the carrier on or off whatever else is going on. Follow Idle Setting is normal operation - the carrier follows Playlist Idle Behavior when nothing is playing. Force Off keeps the transmitter off until this is set back, and is saved, so use it to shut the transmitter down overnight. The KFMT Transmitter command sets this same value.",
+            "restart": 0,
+            "reboot": 0,
+            "type": "select",
+            "default": 0,
+            "options": {
+                "Follow Idle Setting": 0,
+                "Force On": 1,
+                "Force Off": 2
+            }
+        },
         "IdleAction": {
             "name": "IdleAction",
             "description": "Playlist Idle Behavior",
-            "tip": "What to do if a playlist is not playing. Leave Alone and Mute keep the FM carrier on; Disable Carrier turns it off.",
+            "tip": "What to do if a playlist is not playing. Leave Alone and Mute keep the FM carrier on; Disable Carrier turns it off. Ignored while Transmitter is forced on or off.",
             "restart": 0,
             "reboot": 0,
             "type": "select",

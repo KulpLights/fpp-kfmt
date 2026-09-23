@@ -1121,6 +1121,20 @@ public:
 
         // FPP sends "start" only when coming from idle. Restarting an already
         // running playlist (or advancing items) sends "playing".
+        //
+        // FPP builds before the Playlist.cpp fix send one more "playing"
+        // immediately after "stop", as the player goes idle. Taking that at
+        // face value undoes the stop - with Playlist Idle Behavior set to
+        // Disable Carrier, the carrier came back on the moment a show ended.
+        // Belt and suspenders for those builds: only treat it as a start if
+        // the player really is playing.
+        if ((action == "start" || action == "playing") &&
+                !Player::INSTANCE.IsPlaying()) {
+            LogInfo(VB_PLUGIN, "KFMT: ignoring \"%s\" - the player is not playing\n",
+                    action.c_str());
+            return;
+        }
+
         if (action == "start" || action == "playing") {
             playlistActive = true;
             mpcTitle.clear();   // the playlist's own media data takes over

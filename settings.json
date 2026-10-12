@@ -134,7 +134,7 @@
         "InputImpedance": {
             "name": "InputImpedance",
             "description": "Audio Input Impedance",
-            "tip": "Audio Input Impedance (k ohms).",
+            "tip": "Really a coarse volume control: each step down adds 6 dB of input gain (5k loudest, 40k quietest). Any line-out, headphone or USB sound-card output drives all four values fine. Leave at 20k and adjust TX Input Buffer Gain first; drop to 10k or 5k only if audio is still quiet with that at 5.",
             "restart": 0,
             "reboot": 0,
             "level": 1,
@@ -150,7 +150,7 @@
         "TXDigitalGain": {
             "name": "TXDigitalGain",
             "description": "TX Digital Gain",
-            "tip": "Transmit Digital Gain (0dB - 2dB). Higher values increase range but also increase distortion.",
+            "tip": "Extra digital gain after the input buffer (0-2 dB, 1 dB steps). A fine loudness trim; it does not change transmit power or range. Too much distorts loud passages.",
             "restart": 0,
             "reboot": 0,
             "type": "number",
@@ -162,7 +162,7 @@
         "TXInputBufferGain": {
             "name": "TXInputBufferGain",
             "description": "TX Input Buffer Gain",
-            "tip": "Transmit Input Buffer Gain (0-5). Higher values increase range but also increase distortion.",
+            "tip": "Input gain in 3 dB steps (0-5); at 20k impedance, 3 is 0 dB. Raise it if audio is quiet on the radio, lower it if it distorts. It sets loudness, not range: use Transmit Power for that.",
             "restart": 0,
             "reboot": 0,
             "type": "number",

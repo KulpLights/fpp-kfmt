@@ -221,11 +221,13 @@ void RDSPacketBuilder::appendRTPlusSegments(std::string &rt,
             }
 
             uint8_t idx1  = std::get<0>(segment)    & 0x3F; // 6-bit start pos
-            uint8_t len1  = std::get<1>(segment)    & 0x3F; // 6-bit length
+            // The length fields carry the character count minus one (a receiver adds it back).
+            // An empty second tag (content type 0) is sent as all zeros.
+            uint8_t len1  = (std::get<1>(segment) - 1) & 0x3F; // 6-bit length
             uint8_t type1 = std::get<2>(segment)    & 0x3F; // 6-bit content type
 
             uint8_t idx2      = std::get<0>(nextSegment) & 0x3F;
-            uint8_t len2      = std::get<1>(nextSegment) & 0x3F; // only 5 bits used in Block D
+            uint8_t len2      = std::get<1>(nextSegment) ? (std::get<1>(nextSegment) - 1) & 0x3F : 0; // only 5 bits used in Block D
             uint8_t type2_raw = std::get<2>(nextSegment) & 0x3F; // full 6-bit content type
             uint8_t type2     = type2_raw & 0x1F;                // lower 5 bits → Block D[15:11]
             uint8_t ct2_msb   = (type2_raw >> 5) & 0x01;        // CT2[5]        → Block C[0]

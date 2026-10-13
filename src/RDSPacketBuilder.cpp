@@ -1,4 +1,5 @@
 #include "RDSPacketBuilder.h"
+#include "RDSCharset.h"
 
 #include <algorithm>
 #include <cstring>
@@ -69,8 +70,14 @@ RDSPacket RDSPacketBuilder::makePacket(uint8_t b0, uint8_t b1, uint8_t b2,
 // ---------------------------------------------------------------------------
 
 std::vector<RDSPacket> RDSPacketBuilder::buildPSPackets(const std::string &stationName) const {
-    char buf[9] = {0}; // PS Name is max 8 characters, zero-padded
-    strncpy(buf, stationName.c_str(), sizeof(buf) - 1);
+    return psPackets(utf8ToRDS(stationName));
+}
+
+std::vector<RDSPacket> RDSPacketBuilder::psPackets(const std::string &stationName) const {
+    char buf[9];
+    memset(buf, ' ', 8); // PS Name is exactly 8 characters, space-padded
+    buf[8] = 0;
+    memcpy(buf, stationName.data(), std::min<size_t>(stationName.size(), 8));
     // Always send all 4 segments (8 chars): the DI stereo bit (d0) lives in
     // segment 3, so all four packets must be transmitted every time.
     const int rds_len = 8;
@@ -117,6 +124,10 @@ std::vector<RDSPacket> RDSPacketBuilder::buildPSPackets(const std::string &stati
 // ---------------------------------------------------------------------------
 
 std::vector<RDSPacket> RDSPacketBuilder::buildRTPackets(const std::string &radioText) const {
+    return rtPackets(utf8ToRDS(radioText));
+}
+
+std::vector<RDSPacket> RDSPacketBuilder::rtPackets(const std::string &radioText) const {
     char buf[65];
     memset(buf, 0, sizeof(buf));
     strncpy(buf, radioText.c_str(), 64);
@@ -193,7 +204,7 @@ void RDSPacketBuilder::appendRTPlusSegments(std::string &rt,
         std::string rt2 = rt.substr(0, maxIdx);
 
         // Append the Group 2A RT packets for this slice
-        for (auto &p : buildRTPackets(rt2)) {
+        for (auto &p : rtPackets(rt2)) {
             out.push_back(p);
         }
 
@@ -289,8 +300,12 @@ void RDSPacketBuilder::appendRTPlusSegments(std::string &rt,
 // ---------------------------------------------------------------------------
 
 std::vector<RDSPacket> RDSPacketBuilder::buildStationRTPlusSequence(
-    const std::string &stationName,
-    const std::string &homepage) {
+    const std::string &stationNameUtf8,
+    const std::string &homepageUtf8) {
+
+    // Convert first: the RT+ positions below are counted in on-air characters.
+    const std::string stationName = utf8ToRDS(stationNameUtf8);
+    const std::string homepage    = utf8ToRDS(homepageUtf8);
 
     std::vector<RDSPacket> out;
 
@@ -348,9 +363,14 @@ std::vector<RDSPacket> RDSPacketBuilder::buildStationRTPlusSequence(
 // ---------------------------------------------------------------------------
 
 std::vector<RDSPacket> RDSPacketBuilder::buildItemRTPlusSequence(
-    const std::string &artist,
-    const std::string &title,
-    const std::string &album) {
+    const std::string &artistUtf8,
+    const std::string &titleUtf8,
+    const std::string &albumUtf8) {
+
+    // Convert first: the RT+ positions below are counted in on-air characters.
+    const std::string artist = utf8ToRDS(artistUtf8);
+    const std::string title  = utf8ToRDS(titleUtf8);
+    const std::string album  = utf8ToRDS(albumUtf8);
 
     std::vector<RDSPacket> out;
 

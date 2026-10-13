@@ -47,6 +47,9 @@ public:
     // Call this once when the song changes; do NOT call it on periodic re-broadcasts.
     void toggleRTPlus();
 
+    // Every method taking text takes UTF-8 and converts it to the RDS character set
+    // (RDSCharset.h) before building, so lengths and RT+ positions are in on-air characters.
+
     // Group 0B: Programme Service name – 2 chars per packet
     // Block B carries the B0 flag, M/S, and DI; Block C repeats the PI code.
     std::vector<RDSPacket> buildPSPackets(const std::string &stationName) const;
@@ -74,6 +77,10 @@ private:
 
     uint8_t ptyHi() const { return (ptyCode_ & 0x18) >> 3; }
     uint8_t ptyLo() const { return (ptyCode_ << 5) & 0xE0; }
+
+    // Build from text already in the RDS character set.
+    std::vector<RDSPacket> psPackets(const std::string &rdsStationName) const;
+    std::vector<RDSPacket> rtPackets(const std::string &rdsRadioText) const;
 
     RDSPacket makePacket(uint8_t b0, uint8_t b1, uint8_t b2, uint8_t b3,
                          uint8_t b4, uint8_t b5, uint8_t b6, uint8_t b7) const;

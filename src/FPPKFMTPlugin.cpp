@@ -23,6 +23,7 @@
 #include "commands/Commands.h"
 #include "Player.h"
 #include "QN8027.h"
+#include "RDSCharset.h"
 #include "Warnings.h"
 #include "fpphttp.h"
 
@@ -47,11 +48,6 @@ namespace {
                    name, s.c_str(), e.what(), defVal);
             return defVal;
         }
-    }
-
-    void padTo(std::string &s, int l) {
-        size_t n = l - s.size();
-        if (n) s.append(n, ' ');
     }
 }
 
@@ -903,19 +899,9 @@ public:
 
         if (location == 0) {
             LogDebug(VB_PLUGIN, "Setting RDS Station text to \"%s\"\n", output.c_str());
-            std::vector<std::string> fragments;
-            while (!output.empty()) {
-                if (output.size() <= 8) {
-                    padTo(output, 8);
-                    fragments.push_back(output);
-                    output.clear();
-                } else {
-                    std::string lft = output.substr(0, 8);
-                    padTo(lft, 8);
-                    output = output.substr(8);
-                    fragments.push_back(lft);
-                }
-            }
+            // 8 characters per fragment, not 8 bytes: the text is still UTF-8 here and
+            // the packet builder converts each fragment to the RDS character set.
+            std::vector<std::string> fragments = utf8Fragments(output, 8);
             if (fragments.empty()) {
                 fragments.emplace_back("        ");
             }

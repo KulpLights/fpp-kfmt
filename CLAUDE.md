@@ -13,6 +13,8 @@ and RT+) alongside it.
 | `src/QN8027.cpp/.h` | Chip driver — registers, tuning, RDS sends |
 | `src/CP2112.cpp/.h` | USB HID bridge; presents a byte-register interface |
 | `src/RDSPacketBuilder.cpp/.h` | Builds RDS group payloads |
+| `src/RDSCharset.h` | UTF-8 → RDS character set (E.1), one byte per character. The builder converts every string it is given; text reaches it as UTF-8 and is converted exactly once. Shared verbatim with fpp-vastfmt |
+| `tests/` | Host test of the RDS text path (`make -C tests && ./tests/rds_text_test`), decoding with redsea's table |
 | `settings.json` | Setting metadata: types, ranges, tooltips, Advanced gating |
 | `plugin_setup.php` | Settings page, status panel, station-ID preview |
 | `scripts/fpp_install.sh`, `fpp_uninstall.sh` | Lifecycle (build in place) |

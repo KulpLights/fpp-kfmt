@@ -71,6 +71,12 @@ bool CP2112::adapterPresent() {
     return found;
 }
 
+// A K-FMT board's CP2112 is programmed with its own product ID; a bare CP2112
+// keeps Silicon Labs' default.
+bool CP2112::isKFMT() const {
+    return openedPid == KFMT_PID;
+}
+
 void CP2112::closeHandle() {
     if (h) {
         hid_close(h);
@@ -101,6 +107,7 @@ bool CP2112::tryOpen(bool blinkLeds) {
 
             h = hid_open_path(cur->path);
             if (h) {
+                openedPid = cur->product_id;
                 LogInfo(VB_PLUGIN, "CP2112: Device opened successfully\n");
                 LogInfo(VB_PLUGIN, "Manufacturer: %ls\n", cur->manufacturer_string);
                 LogInfo(VB_PLUGIN, "Product: %ls\n", cur->product_string);

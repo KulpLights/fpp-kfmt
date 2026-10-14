@@ -16,6 +16,13 @@ public:
     bool tryReconnect();
     void reset();
 
+    // True when the chip sits on a KulpLights K-FMT board (an RF amplifier
+    // follows the chip; see the plugin's power mapping). boardName() is
+    // "KFMT", "QN8027" for any other bridge or native I2C, or "unknown" when
+    // no bridge has opened since fppd started.
+    bool isKFMT() const { return cp2112 && cp2112->isKFMT(); }
+    const char* boardName() const;
+
     void printInfo();
 
 

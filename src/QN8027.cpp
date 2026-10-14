@@ -166,6 +166,16 @@ bool QN8027::adapterPresent() const {
     return i2c != nullptr;
 }
 
+const char* QN8027::boardName() const {
+    if (i2c) {
+        return "QN8027";
+    }
+    if (cp2112 && cp2112->hasOpened()) {
+        return cp2112->isKFMT() ? "KFMT" : "QN8027";
+    }
+    return "unknown";
+}
+
 bool QN8027::busOpen() const {
     if (cp2112) {
         return cp2112->isOpen();

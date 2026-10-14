@@ -267,7 +267,7 @@ public:
             // Channel change retunes the antenna; a full bring-up is required.
             queueRadioWork([this]() { initializeQN8027(); });
             restoreAfterRadioChange();
-        } else if (key == "TransmitPower" && detected) {
+        } else if ((key == "TransmitPower" || key == "PowerLevel") && detected) {
             queueRadioWork([this]() { applyTransmitPower(); });
             restoreAfterRadioChange();
         } else if (detected &&
@@ -378,16 +378,9 @@ public:
                 safeStoi(settings["TXDigitalGain"], 0, "TXDigitalGain"));
             qn8027.setTxDigitalGain(dg);
 
-            // UI 1–100 -> PAC 20–75. The old code did ui/55+20, which mapped
-            // the whole slider to PAC 20–22 (~1 dB), so Airspy barely moved.
-            // Datasheet: Power(dBuV) = 0.62*PAC + 71, PAC valid 20–75.
-            float ui = safeStof(settings["TransmitPower"], 50.0f, "TransmitPower");
-            if (ui < 0.0f) ui = 0.0f;
-            if (ui > 100.0f) ui = 100.0f;
-            float tp = 20.0f + (ui / 100.0f) * 55.0f;
-            uint8_t pac = static_cast<uint8_t>(std::round(tp));
-            LogInfo(VB_PLUGIN, "KFMT: TransmitPower UI=%0.0f -> PAC=%u (~%0.1f dBuV)\n",
-                    ui, pac, 0.62f * pac + 71.0f);
+            uint8_t pac = mappedPaTarget();
+            LogInfo(VB_PLUGIN, "KFMT: %s board, transmit power -> PAC=%u (~%0.1f dBuV)\n",
+                    qn8027.boardName(), pac, 0.62f * pac + 71.0f);
             qn8027.setTxPower(pac);
 
             qn8027.RDS(rdsEnabled() ? 1 : 0);
@@ -406,17 +399,47 @@ public:
         }
     }
 
-    uint8_t mappedPaTarget() {
+    // A K-FMT board follows the chip with a two-transistor RF amplifier, and
+    // its output has two levels rather than the chip's 0.62 dB steps: every
+    // PAC up to 29 measured one level, and every PAC from 30 up one level
+    // about 18 dB higher. So those boards get High/Low (PowerLevel), each set
+    // well clear of the step.
+    static constexpr uint8_t kKfmtLowPac = 20;
+    static constexpr uint8_t kKfmtHighPac = 61;
+    static constexpr uint8_t kKfmtStepPac = 30;
+
+    // Transmit Power 1–100 -> PAC 20–75. The old code did ui/55+20, which
+    // mapped the whole slider to PAC 20–22 (~1 dB), so Airspy barely moved.
+    // Datasheet: Power(dBuV) = 0.62*PAC + 71, PAC valid 20–75.
+    uint8_t transmitPowerPac() {
         float ui = safeStof(settings["TransmitPower"], 50.0f, "TransmitPower");
         if (ui < 0.0f) ui = 0.0f;
         if (ui > 100.0f) ui = 100.0f;
         return static_cast<uint8_t>(std::round(20.0f + (ui / 100.0f) * 55.0f));
     }
 
+    bool kfmtHighPower() {
+        auto it = settings.find("PowerLevel");
+        if (it != settings.end() && !it->second.empty()) {
+            return it->second != "0";
+        }
+        // Never chosen: keep the level Transmit Power already gave this board.
+        // plugin_setup.php shows the same derivation.
+        return transmitPowerPac() >= kKfmtStepPac;
+    }
+
+    uint8_t mappedPaTarget() {
+        if (qn8027.isKFMT()) {
+            return kfmtHighPower() ? kKfmtHighPac : kKfmtLowPac;
+        }
+        return transmitPowerPac();
+    }
+
     void applyTransmitPower() {
         uint8_t pac = mappedPaTarget();
-        LogInfo(VB_PLUGIN, "KFMT: TransmitPower UI=%s -> PAC=%u\n",
-                settings["TransmitPower"].c_str(), pac);
+        LogInfo(VB_PLUGIN, "KFMT: %s board, TransmitPower=%s PowerLevel=%s -> PAC=%u\n",
+                qn8027.boardName(), settings["TransmitPower"].c_str(),
+                settings["PowerLevel"].c_str(), pac);
         qn8027.setTxPower(pac);
         if (carrierEnabled) {
             qn8027.stopTransmit();
@@ -527,6 +550,8 @@ public:
 
         const bool adapter = qn8027.adapterPresent();
         root["adapterPresent"] = adapter;
+        // Which power control the page shows. Reported while unplugged too.
+        root["board"] = qn8027.boardName();
 
         if (!adapter) {
             if (detected) {

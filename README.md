@@ -37,7 +37,9 @@ Install from **Content Setup → Plugins** in the FPP web UI, then restart FPPD.
 - *FM Frequency* — transmit frequency.
 - *Preemphasis* — preemphasis time constant.
 - *Playlist Idle Behavior* — Leave Alone, Mute, or Disable Carrier when nothing is playing.
-- *Transmit Power* — RF output level.
+- *Transmit Power* — RF output level. On a K-FMT board this is High or Low: its RF amplifier has
+  two output levels, about 18 dB apart, rather than a range. Other QN8027 boards get 1–100, plus
+  the antenna tuning readout and Retune button in the status panel.
 - *Audio Input Impedance*, *TX Digital Gain*, *TX Input Buffer Gain* — audio input staging.
 
 **RDS Settings**

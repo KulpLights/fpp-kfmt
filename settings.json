@@ -7,6 +7,7 @@
                 "Preemphasis",
                 "IdleAction",
                 "TransmitPower",
+                "PowerLevel",
                 "InputImpedance",
                 "TXDigitalGain",
                 "TXInputBufferGain"
@@ -130,6 +131,18 @@
             "default": 50,
             "min": 1,
             "max": 100
+        },
+        "PowerLevel": {
+            "name": "PowerLevel",
+            "description": "Transmit Power",
+            "tip": "A K-FMT board has two output levels rather than a range: the RF amplifier after the transmitter chip runs either at full output (High) or about 18 dB below it (Low). Low is for a smaller coverage area. Shown instead of the 1\u2013100 setting when a K-FMT board is connected.",
+            "restart": 0,
+            "reboot": 0,
+            "type": "select",
+            "options": {
+                "High": 1,
+                "Low": 0
+            }
         },
         "InputImpedance": {
             "name": "InputImpedance",

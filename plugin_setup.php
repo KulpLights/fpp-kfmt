@@ -1,6 +1,22 @@
 <?php $kfmtFreqNote = "Not sure which frequency to use? <a href=\"https://radio-locator.com/cgi-bin/vacant\" target=\"_blank\" rel=\"noopener noreferrer\">radio-locator.com</a> lists the vacant FM channels for your area."; ?>
 <div id="global" class="settings">
+<style>
+/* Which power control applies depends on the board, which the first status
+   poll reports; kfmtShowBoard() reveals the right one. Classes rather than
+   jQuery show(), which would replace the Bootstrap row's flex with block. */
+#TransmitPowerRow:not(.kfmt-shown), #PowerLevelRow:not(.kfmt-shown) { display: none; }
+.kfmt-hidden { display: none !important; }
+</style>
 <?
+global $pluginSettings;
+// PowerLevel has no default on purpose: until it is chosen, a K-FMT board keeps
+// the level its Transmit Power already gave it. Transmit Power 18 and up maps
+// to PAC 30 or more, which is High (see mappedPaTarget()).
+if (!isset($pluginSettings['PowerLevel']) || $pluginSettings['PowerLevel'] === '') {
+    $kfmtUi = isset($pluginSettings['TransmitPower']) ? floatval($pluginSettings['TransmitPower']) : 50;
+    $kfmtUi = max(0, min(100, $kfmtUi));
+    $pluginSettings['PowerLevel'] = (round(20 + $kfmtUi / 100 * 55) >= 30) ? '1' : '0';
+}
 PrintSettingGroup("KFMTRadio", "", $kfmtFreqNote, 1, "fpp-kfmt");
 PrintSettingGroup("KFMTRDSSettings", "", "", 1, "fpp-kfmt");
 ?>
@@ -28,9 +44,9 @@ PrintSettingGroup("KFMTRDSSettings", "", "", 1, "fpp-kfmt");
   <div id="kfmtPsMeta"></div>
 </div>
 <h2>Transmitter Status</h2>
-<p class="text-body">Antenna Tuning shows the QN8027's antenna tuning register. The chip gives no readable measure of how good the match is, so judge it with a receiver. Retune re-runs the chip's calibration - do that after moving the antenna or its enclosure, and not during a show.</p>
+<p class="text-body kfmt-tuning">Antenna Tuning shows the QN8027's antenna tuning register. The chip gives no readable measure of how good the match is, so judge it with a receiver. Retune re-runs the chip's calibration - do that after moving the antenna or its enclosure, and not during a show.</p>
 <div class="mb-3">
-  <button type="button" class="buttons btn-success" id="kfmtRetuneBtn" onclick="kfmtRetune();">Retune Antenna</button>
+  <button type="button" class="buttons btn-success kfmt-tuning" id="kfmtRetuneBtn" onclick="kfmtRetune();">Retune Antenna</button>
   <button type="button" class="buttons" id="kfmtClearPeakBtn" onclick="kfmtClearPeak();">Clear Audio Peak</button>
   <span id="kfmtRetuneMsg" class="ms-2"></span>
 </div>
@@ -41,9 +57,9 @@ PrintSettingGroup("KFMTRDSSettings", "", "", 1, "fpp-kfmt");
     <tr><th scope="row">Channel</th><td id="kfmtChannel">—</td></tr>
     <tr><th scope="row">FSM</th><td id="kfmtFsm">—</td></tr>
     <tr><th scope="row">Carrier</th><td id="kfmtCarrier">—</td></tr>
-    <tr><th scope="row">Antenna Tuning</th><td id="kfmtAnt">—</td></tr>
+    <tr class="kfmt-tuning"><th scope="row">Antenna Tuning</th><td id="kfmtAnt">—</td></tr>
     <tr><th scope="row">Audio peak</th><td id="kfmtPeak">—</td></tr>
-    <tr><th scope="row">Last retune</th><td id="kfmtLastRetune">—</td></tr>
+    <tr class="kfmt-tuning"><th scope="row">Last retune</th><td id="kfmtLastRetune">—</td></tr>
   </tbody>
 </table>
 </div>
@@ -53,6 +69,27 @@ function kfmtSetText(id, text, warn) {
     if (!el) return;
     el.textContent = text;
     el.classList.toggle('text-danger', !!warn);
+}
+// A K-FMT board gets the High/Low power control instead of the 1-100 range,
+// and no antenna tuning: the chip's tuning there faces the RF amplifier, not
+// the antenna, so neither the register nor Retune tells you about the antenna.
+var kfmtBoard = null;
+function kfmtShowBoard(board) {
+    if (board === undefined) {
+        // A plugin built before boards were reported (fppd not yet restarted
+        // after an update) only knows Transmit Power. A timeout reply also
+        // lacks it, so this never overrides a board already seen.
+        if (kfmtBoard === null) {
+            $('#TransmitPowerRow').addClass('kfmt-shown');
+        }
+        return;
+    }
+    if (board === kfmtBoard) return;
+    kfmtBoard = board;
+    var kfmt = board === 'KFMT';
+    $('#PowerLevelRow').toggleClass('kfmt-shown', kfmt);
+    $('#TransmitPowerRow').toggleClass('kfmt-shown', !kfmt);
+    $('.kfmt-tuning').toggleClass('kfmt-hidden', kfmt);
 }
 // URLs here are relative on purpose. An absolute "/api/..." loses the prefix
 // when the page is reached through FPP's proxy or loaded by FPPMon, and the
@@ -65,6 +102,7 @@ function kfmtRefreshStatus() {
         cache: false
     })
         .done(function (s) {
+            kfmtShowBoard(s.board);
             if (s.adapterPresent === false) {
                 kfmtSetText('kfmtAdapter', 'Disconnected', true);
                 kfmtSetText('kfmtFsm', s.fsmName || 'Disconnected', true);
@@ -87,14 +125,17 @@ function kfmtRefreshStatus() {
             kfmtSetText('kfmtFsm', s.fsmName || ('FSM ' + s.fsm), false);
             var carrier = s.transmitting ? (s.muted ? 'on (muted)' : 'on') : 'off';
             kfmtSetText('kfmtCarrier', carrier, !s.transmitting);
-            if (s.antRail) match += ' (ANT at rail)';
-            kfmtSetText('kfmtAnt', '0x' + s.antHex, s.antRail);
+            kfmtSetText('kfmtAnt', '0x' + s.antHex + (s.antRail ? ' (at rail)' : ''), s.antRail);
             var peak = String(s.audioPeak) + ' / 15 (max-hold)';
             if (s.audioClip) peak += ' — clipping since last clear';
             kfmtSetText('kfmtPeak', peak, s.audioClip);
             kfmtSetText('kfmtLastRetune', s.lastRetune || 'none', s.lastRetune === 'out of range');
         })
         .fail(function (xhr) {
+            // Without a board answer, offer both power controls rather than none.
+            if (kfmtBoard === null) {
+                $('#PowerLevelRow, #TransmitPowerRow').addClass('kfmt-shown');
+            }
             kfmtSetText('kfmtFsm', 'status unavailable' + (xhr && xhr.status ? ' (' + xhr.status + ')' : ''), true);
         });
 }

@@ -20,6 +20,11 @@ public:
     bool tryOpen(bool blinkLeds = true);
     void closeHandle();
 
+    // The bridge last opened. Kept across a disconnect, so the board type is
+    // still known while it is unplugged.
+    bool hasOpened() const { return openedPid != 0; }
+    bool isKFMT() const;
+
     // Write/Read operations matching I2CUtils interface
     void writeByteData(uint8_t regAddr, uint8_t data);
     uint8_t readByteData(uint8_t regAddr, bool resetOnFail = true);
@@ -44,6 +49,7 @@ private:
     hid_device* h = nullptr;
     uint8_t i2cAddress = 0x2c;  // Default I2C address for QN8027
     bool initialized = false;
+    uint16_t openedPid = 0;
 
     // Helper methods
     void sendHIDCommand(const std::vector<uint8_t>& data);

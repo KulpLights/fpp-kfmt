@@ -77,6 +77,25 @@ bool CP2112::isKFMT() const {
     return openedPid == KFMT_PID;
 }
 
+// The release version is not in the USB device descriptor (bcdDevice reads 0
+// whatever was programmed), so read it from the chip's USB configuration
+// feature report: VID(1-2), PID(3-4), power(5), power mode(6), release
+// major(7), release minor(8).
+void CP2112::readRelease() {
+    openedRelease = 0;
+    if (!h || openedPid != KFMT_PID) {
+        return;
+    }
+    unsigned char buf[64] = {0x21};
+    int n = hid_get_feature_report(h, buf, sizeof(buf));
+    if (n >= 9) {
+        openedRelease = static_cast<uint16_t>((buf[7] << 8) | buf[8]);
+        LogInfo(VB_PLUGIN, "CP2112: K-FMT board release %x.%x\n", buf[7], buf[8]);
+    } else {
+        LogWarn(VB_PLUGIN, "CP2112: could not read the board release (%d)\n", n);
+    }
+}
+
 void CP2112::closeHandle() {
     if (h) {
         hid_close(h);
@@ -108,6 +127,7 @@ bool CP2112::tryOpen(bool blinkLeds) {
             h = hid_open_path(cur->path);
             if (h) {
                 openedPid = cur->product_id;
+                readRelease();
                 LogInfo(VB_PLUGIN, "CP2112: Device opened successfully\n");
                 LogInfo(VB_PLUGIN, "Manufacturer: %ls\n", cur->manufacturer_string);
                 LogInfo(VB_PLUGIN, "Product: %ls\n", cur->product_string);

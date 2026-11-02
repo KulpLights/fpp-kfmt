@@ -399,14 +399,24 @@ public:
         }
     }
 
-    // A K-FMT board follows the chip with a two-transistor RF amplifier, and
-    // its output has two levels rather than the chip's 0.62 dB steps: every
-    // PAC up to 29 measured one level, and every PAC from 30 up one level
-    // about 18 dB higher. So those boards get High/Low (PowerLevel), each set
-    // well clear of the step.
+    // A K-FMT board's output has two levels rather than the chip's 0.62 dB
+    // steps: every PAC up to about 30 measured one level and everything above
+    // a much higher one. The step comes from the transmitter module, not the
+    // amplifier - the 1.1 board's linear amplifier shows it too - so K-FMT
+    // boards get High/Low (PowerLevel) instead of a range.
+    //  - Original (1.0) board: low level about 18 dB below high; Low uses it.
+    //  - 1.1 board: low level about 35 dB below high, too weak to be useful,
+    //    so Low is PAC 32, just above the step, about 10 dB below high. Its
+    //    output is flat from PAC 36 up.
     static constexpr uint8_t kKfmtLowPac = 20;
+    static constexpr uint8_t kKfmt11LowPac = 32;
     static constexpr uint8_t kKfmtHighPac = 61;
     static constexpr uint8_t kKfmtStepPac = 30;
+    static constexpr uint16_t kKfmtRelease11 = 0x0101;
+
+    uint8_t kfmtLowPac() {
+        return qn8027.boardRelease() >= kKfmtRelease11 ? kKfmt11LowPac : kKfmtLowPac;
+    }
 
     // Transmit Power 1–100 -> PAC 20–75. The old code did ui/55+20, which
     // mapped the whole slider to PAC 20–22 (~1 dB), so Airspy barely moved.
@@ -430,7 +440,7 @@ public:
 
     uint8_t mappedPaTarget() {
         if (qn8027.isKFMT()) {
-            return kfmtHighPower() ? kKfmtHighPac : kKfmtLowPac;
+            return kfmtHighPower() ? kKfmtHighPac : kfmtLowPac();
         }
         return transmitPowerPac();
     }
@@ -552,6 +562,11 @@ public:
         root["adapterPresent"] = adapter;
         // Which power control the page shows. Reported while unplugged too.
         root["board"] = qn8027.boardName();
+        if (uint16_t rel = qn8027.boardRelease()) {
+            char buf[8];
+            snprintf(buf, sizeof(buf), "%x.%x", rel >> 8, rel & 0xFF);
+            root["boardRelease"] = buf;
+        }
 
         if (!adapter) {
             if (detected) {

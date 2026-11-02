@@ -21,6 +21,8 @@ public:
     // "KFMT", "QN8027" for any other bridge or native I2C, or "unknown" when
     // no bridge has opened since fppd started.
     bool isKFMT() const { return cp2112 && cp2112->isKFMT(); }
+    // K-FMT hardware revision (BCD, 0x0100 = 1.0), 0 when not known.
+    uint16_t boardRelease() const { return isKFMT() ? cp2112->boardRelease() : 0; }
     const char* boardName() const;
 
     void printInfo();

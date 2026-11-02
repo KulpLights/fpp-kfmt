@@ -24,6 +24,10 @@ public:
     // still known while it is unplugged.
     bool hasOpened() const { return openedPid != 0; }
     bool isKFMT() const;
+    // A K-FMT board's hardware revision, from the release version programmed
+    // into the CP2112 (BCD, 0x0100 = 1.0). Boards built before the revision
+    // was programmed read the factory 1.0; 0 when unknown or not a K-FMT.
+    uint16_t boardRelease() const { return openedRelease; }
 
     // Write/Read operations matching I2CUtils interface
     void writeByteData(uint8_t regAddr, uint8_t data);
@@ -50,6 +54,9 @@ private:
     uint8_t i2cAddress = 0x2c;  // Default I2C address for QN8027
     bool initialized = false;
     uint16_t openedPid = 0;
+    uint16_t openedRelease = 0;
+
+    void readRelease();
 
     // Helper methods
     void sendHIDCommand(const std::vector<uint8_t>& data);

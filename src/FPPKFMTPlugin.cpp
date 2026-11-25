@@ -542,6 +542,19 @@ public:
         }
     }
 
+    // An I2C error closes the bus from inside the driver, and nothing up here
+    // hears about it, so 'detected' would stay true with no transmitter behind
+    // it. The run loop only reconnects when 'detected' is false; before both
+    // paths checked this, a single bad read left the radio dark until someone
+    // opened the plugin page and the status poll noticed.
+    void noteBusClosed() {
+        if (detected && !qn8027.busOpen()) {
+            LogInfo(VB_PLUGIN, "KFMT: bus closed after an I2C error, reconnecting\n");
+            detected = false;
+            nextReconnectTry = 0;
+        }
+    }
+
     void markDisconnected(const char *link) {
         detected = false;
         carrierEnabled = false;
@@ -589,10 +602,8 @@ public:
         // The RDS loop is already talking to the chip every 400 ms, and any
         // real failure there closes the handle via handleI2CError(), so
         // busOpen() is a sufficient and side-effect-free liveness signal.
+        noteBusClosed();
         if (!detected) {
-            attemptReconnect();
-        } else if (!qn8027.busOpen()) {
-            detected = false;
             attemptReconnect();
         }
 
@@ -728,6 +739,7 @@ public:
         while (running) {
             uint64_t ct = GetTimeMS();
 
+            noteBusClosed();
             if (!detected && ct > nextReconnectTry) {
                 nextReconnectTry = ct + reconnectInterval();
                 lk.unlock();
